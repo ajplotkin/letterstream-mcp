@@ -317,13 +317,9 @@ default account, and cannot obtain them for you.
    round trip, not an instant self-service key. Their [API
    page](https://www.letterstream.com/api/) is where that request starts.
 
-3. **Find your API ID and API key in your account.** LetterStream's publicly
-   readable help pages do not document the exact navigation path, so this
-   README does not print one; navigate from your signed-in account rather than
-   from a link here. This package's own missing-credentials message points at
-   *My Account → API Information*, which is where they were found in practice,
-   but treat that as a hint rather than as documentation — if the interface has
-   moved, the interface is right and the hint is wrong.
+3. **Find your API ID and API key under *My Account → API Information*.**
+   LetterStream's publicly readable help pages do not document this path, so if
+   the interface has moved, the interface is right and this line is out of date.
 
 4. **Copy the example config and fill in the two credentials.**
 
