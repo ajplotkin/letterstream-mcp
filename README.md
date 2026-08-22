@@ -1,18 +1,16 @@
 # letterstream-mcp
 
-An MCP server for [LetterStream](https://www.letterstream.com/)'s certified-mail
-API, built around a question that matters more than the API client: **how do you
-let an agent take an irreversible real-world action safely?**
+An MCP server for [LetterStream](https://www.letterstream.com/)'s mailing API —
+certified mail, first class, and the other mail types they support. Mailing
+takes two separate calls rather than one, because a letter cannot be recalled
+once it has been released.
 
-Sending certified mail is a good test case because it is unusually
-unforgiving. It spends money. It puts a physical object in the postal system.
-The document can start a statutory clock. There is no undo, no `DELETE`
-endpoint, no support ticket that unsends a letter. If an agent gets a normal
-`send()` tool, then a hallucinated address, a stale draft, a retried call after
-a timeout, or a misread instruction all resolve the same way: something gets
-mailed.
-
-So this server has no `send()`.
+The reason for the split is specific. A mailing spends money, puts a physical
+object in the postal system, and can start a statutory clock, and there is no
+endpoint that undoes any of that. A single `send()` gives a caller no point at
+which a wrong address or a retry after a timeout can be caught, so this server
+does not have one: `submit` creates a job LetterStream holds, and a separate
+`authorize` releases it.
 
 ## The gate
 
@@ -95,6 +93,43 @@ runs against a local temporary directory, so that case is untested and
 unclaimed. And, as above, nothing serialises a program that writes
 `proofs.json` directly instead of calling these tools.
 
+One more boundary, because *What has been verified against the live service*
+further down reports a live test and this is not part of it: the races in point
+5 are run in process against a fake transport. No concurrent call has been made
+to LetterStream. The serialisation claim rests on the suite and the mutation
+harness, not on live evidence.
+
+### A failure the gate cannot catch: the envelope window
+
+Worth reading even if you skip the rest of this page, because it has actually
+happened and nothing in this repository would have prevented it.
+
+On a real mailing, an entire batch of certified pieces was submitted with
+`coversheet` set to `"N"`, on the reasoning that the PDFs already carried the
+recipient's address laid out on the page. The whole batch was delivered to the
+wrong address — the same wrong address for every piece, in a different state
+from most of the intended recipients. LetterStream support confirmed the cause:
+an address on the PDF fell in the window area of their windowed envelopes, and
+USPS read what showed through the window rather than the address supplied
+through the API.
+
+The fix in that case was `coversheet = "Y"`, which has LetterStream generate
+their own addressed coversheet so the window shows the address the API was
+given. `"Y"` is this package's default. It addresses this specific failure mode;
+it is not a general guarantee that a piece arrives where you intended.
+
+Now note what the gate did and did not do. The job was submitted, held,
+reviewed and authorised correctly. The addresses carried through the API were
+right. The cost was right. The tracking numbers were right. The properties this
+repository argues for held — and the mail still went to the wrong state. The
+gate's promise is that nothing is mailed that a human did not approve. It says
+nothing about whether the approved thing is correct once it leaves. A proof PDF
+shows you the page; it does not show you which part of the page will be visible
+through an envelope.
+
+So: if you set `coversheet` to `"N"`, you are taking responsibility for the
+window area of every page yourself, and no check in this codebase is watching.
+
 ### The other safety properties
 
 - **Dry run is the default.** With live mode off, no transport method is called
@@ -143,34 +178,112 @@ unclaimed. And, as above, nothing serialises a program that writes
   told the proof was already authorised; the assertion is on the fake
   transport's `release_calls`, over sixty independent races per run. Within one
   process that holds unconditionally. Across processes it holds wherever `flock`
-  does — see the boundary above, which is not a formality.
+  does — see the boundary above, which is not a formality. The sequential half
+  of this has also been observed against the live service; the simultaneous half
+  has not. Both are separated out in the next section.
 - **Proofs go stale.** Past a configurable TTL (default 24h), `authorize`
   refuses and you must submit and re-review.
 - **Credentials come from you.** There is no key in this repository, no default
   account, and no fallback. Missing credentials produce a paragraph explaining
   where the code looked, and exit code 2 — not a traceback.
 
+## What has been verified against the live service
+
+On 22 August 2026 the CLI was run in live mode against a real LetterStream
+account with real credentials. Two jobs were submitted and released: one page
+and one recipient each, both to the same real postal address, one **certified**
+(quoted $11.01) and one **first class** (quoted $1.19). That is the entire body
+of live evidence — two letters, one address, one session — and every item below
+is bounded by it. The subsection immediately after it is not optional reading.
+
+- **Authentication works.** The auth digest in this repository was written from
+  LetterStream's published documentation rather than copied from an existing
+  client, and the service accepted it (`AUTHOK`).
+- **`submit` creates a held job that does not mail.** This is the one that
+  previously could not be checked from inside the code. After `submit` returned,
+  a human opened LetterStream's web UI and confirmed the job was sitting there
+  unreleased. LetterStream honoured the pre-authorisation flag.
+- **A tracking number exists before authorisation.** The certified job carried a
+  real USPS tracking number while it was still held and unmailed. So the number
+  a USPS notification subscription needs is in hand during the review window,
+  before anything is committed to the mail stream. Subscribing is still not
+  something this project does — see *What it does not do* — but nothing has to
+  be mailed first to obtain the number.
+- **The quote is the charge.** On both jobs the amount `authorize` reported as
+  charged equalled the amount `submit` quoted, and `cost_matches_quote` came
+  back true.
+- **`authorize` releases the job.** `mailed: true`, and LetterStream returned a
+  success code.
+- **Authorising twice does not mail twice or charge twice.** A second
+  `authorize` on the same proof returned `mailed: false`,
+  `already_authorized: true`, and the originally recorded response carrying its
+  original timestamp. No second release and no second charge. This had been
+  demonstrated only against the fake transport; the sequential case now holds
+  against the live service too.
+- **`mail_type` is genuinely configurable.** Certified and first class both went
+  through, and priced differently.
+- **A different document is not deduplicated.** The second submission reported
+  `reused_existing_submission: false` rather than handing back the first job's
+  proof.
+
+### What that session did not establish
+
+Kept adjacent on purpose, because the list above is easy to over-read.
+
+- **Concurrency was not exercised live.** The claims on this page about two
+  callers racing — the release lock, the submit lock, six threads, four
+  processes — rest on the test suite and the mutation harness, in process,
+  against a fake transport. No concurrent call was made to LetterStream.
+- **`interpret_job_status` is still fixtures-only.** It has one call site, on
+  the reconciliation path: a resubmission after a previous attempt failed to
+  report back. No such failure was provoked, so that path was never entered.
+  Its docstring says the same thing.
+- **The document-hash check was not verified live.** An attempt was made and did
+  not test what it appeared to test: it ran against a proof that had already
+  been authorised, so the `already_authorized` branch answered first and the
+  hash was never compared — the right answer for the wrong reason. A live run
+  would add nothing here in any case. That check is purely local: `authorize`
+  re-hashes the file on disk and compares before any transport call is made, so
+  no service behaviour is involved. That is what distinguishes it from the
+  pre-authorisation hold, where the thing in question was LetterStream's
+  behaviour rather than this code's. It is covered by `test_tampering.py` and by
+  two of the mutations.
+- **Nothing else changed.** The session added no capability. Everything under
+  *What it does not do* is still not done.
+
 ## What it does not do
 
-- **It has never been run against the live LetterStream API by this project.**
-  Every test runs against a fake transport, and the suite blocks in-process
-  socket connections so that stays true. The request shapes are built from
-  LetterStream's published integration documentation; whether the live service
-  responds exactly as modelled is **unverified here**. In particular, the
-  function that decides whether a job already exists (`interpret_job_status`)
-  is exercised only against fixtures — its docstring says so too.
+- **It has been run against the live LetterStream API in one session only** —
+  the two letters described above. The test suite itself never touches the
+  network: every test runs against a fake transport, and the suite blocks
+  in-process socket connections so that stays true. The request shapes are built
+  from LetterStream's published integration documentation, and that session
+  confirms the submission and release shapes and nothing wider. In particular
+  the function that decides whether a job already exists
+  (`interpret_job_status`) is exercised only against fixtures — its docstring
+  says so too.
 - It does not batch-upload ZIP archives (LetterStream's other submission
   method). One PDF, one job, one or more recipients.
 - It does not do USPS notification subscriptions, address validation, or
-  pre-flight envelope checking.
+  pre-flight envelope checking. For certified mail it does surface the tracking
+  number a subscription would need, at submit time — see the `per_doc` note
+  under *MCP tool surface* — but subscribing is left to you.
 - It does not cancel or recall a released job. Nothing here can.
 - It does not manage LetterStream account funding or test mode. Those are web
   UI settings on your account, and they are an additional layer of protection
   this code does not control and cannot see.
-- The "held, not mailed" half of the gate ultimately depends on LetterStream
-  honouring the pre-authorisation flag on their side. This project guarantees
-  the flag is always sent and never overridable by a caller; it cannot verify
-  what the service does with it, and has not tried.
+- The "held, not mailed" half of the gate depends on LetterStream honouring the
+  pre-authorisation flag on their side. This project guarantees the flag is
+  always sent and never overridable by a caller, and one live submission was
+  confirmed held and unmailed in LetterStream's web UI — so the dependency has
+  been checked once rather than assumed. What the code still cannot do is see
+  that for itself: it reads LetterStream's response, not their production queue,
+  so it could not detect a job that was mailed despite the flag.
+- It does not inspect the layout of your PDF, and in particular does not check
+  whether an address falls in the window area of LetterStream's envelopes. That
+  has caused a whole batch to be delivered to one wrong address on a real
+  mailing, with the gate raising no objection at any point — see *A failure the
+  gate cannot catch: the envelope window*.
 - The proof ledger on disk is a local trust root. Anything able to write to
   `state/` can forge a proof, and anything able to read it holds the authcodes.
   Put it somewhere only you can write.
@@ -189,20 +302,69 @@ only to run the MCP server, and `pytest` only to run the tests.
 
 ## Configuration
 
-You need your own LetterStream API credentials. LetterStream issues these after
-you request and are granted API access on your account; this project ships none
-and cannot obtain them for you.
+### Setup, start to finish
 
-Copy the example and fill in the blanks:
+You need your own LetterStream API credentials. This project ships none, has no
+default account, and cannot obtain them for you.
 
-```bash
-cp config.example.toml config.toml
-```
+1. **Create a LetterStream account, or sign in to one.** Their public site is
+   [letterstream.com](https://www.letterstream.com/).
+
+2. **Ask LetterStream to enable API access.** It is not on by default. Their
+   published help material describes a review-and-approval step before API
+   access is switched on for an account, and says the API documentation and
+   sample code only become available inside the account after that. Expect a
+   round trip, not an instant self-service key. Their [API
+   page](https://www.letterstream.com/api/) is where that request starts.
+
+3. **Find your API ID and API key in your account.** LetterStream's publicly
+   readable help pages do not document the exact navigation path, so this
+   README does not print one; navigate from your signed-in account rather than
+   from a link here. This package's own missing-credentials message points at
+   *My Account → API Information*, which is where they were found in practice,
+   but treat that as a hint rather than as documentation — if the interface has
+   moved, the interface is right and the hint is wrong.
+
+4. **Copy the example config and fill in the two credentials.**
+
+   ```bash
+   cp config.example.toml config.toml
+   ```
+
+   Set `api_id` and `api_key` in the `[credentials]` section. On a shared
+   machine, export `LETTERSTREAM_API_ID` and `LETTERSTREAM_API_KEY` instead, so
+   the key never lands in a file or in shell history.
+
+5. **Leave `live = false` for now.** That is how the example ships. In this
+   state no request of any kind reaches LetterStream: `submit` returns a local
+   preview and `authorize` refuses outright.
+
+6. **Check the configuration.**
+
+   ```bash
+   letterstream-mcp check-config
+   ```
+
+   It reports whether credentials were found, which mode you are in, and
+   whether cross-process locking is available. It never prints the key.
+
+7. **Do a dry run first.** Run a real `submit` with `live = false` and read the
+   preview — the sender and recipient block, the document hash, the recipient
+   count. This costs nothing and touches nothing.
+
+8. **Only then set `live = true`.** Edit `[safety] live` in `config.toml`, or
+   set `LETTERSTREAM_LIVE=true`. This is deliberately a separate, manual step:
+   there is no `--live` flag and no MCP tool parameter that can flip it, so
+   neither an agent nor a mistyped command can turn dry run into live mode.
+   Turning it on still does not mail anything by itself — `submit` creates a
+   held job, and `authorize` is what releases it.
 
 `config.toml` is in `.gitignore`. Every credential, path and tuning value in
 `config.example.toml` is blank and documented; the one value that is filled in is
 `live = false`. Copying the example unedited fails with the missing-credentials
 message rather than half-working — there is a test for that.
+
+### Where settings come from
 
 Resolution order, highest priority first:
 
@@ -214,8 +376,7 @@ Resolution order, highest priority first:
    `./config.toml`, then `~/.config/letterstream-mcp/config.toml`
 
 `live` is the exception: it is settable only in the config file or via
-`LETTERSTREAM_LIVE`. On a shared machine, prefer the environment for the key so
-it never lands in a file or in shell history.
+`LETTERSTREAM_LIVE`, as in step 8 above.
 
 With nothing configured:
 
@@ -252,10 +413,10 @@ tools.
 
 ## Worked example
 
-Recipients below are synthetic. Figures shown in the responses are illustrative
-— this project has not called the live LetterStream API, so the prices here come
-from test fixtures, not from a real quote. Start in dry run, which is where you
-already are, because live mode is off by default.
+Recipients below are synthetic. The costs in the responses come from the test
+fixtures and the document hashes are invented placeholders; neither comes from
+the live session described above. Start in dry run, which is where you already are, because live mode is
+off by default.
 
 ```bash
 letterstream-mcp submit \
@@ -308,7 +469,7 @@ Download and read what will actually be printed:
 letterstream-mcp download-proofs prf_... --out-dir ./proofs
 ```
 
-Then, and only then:
+Once you have read the proof and are satisfied with it, authorize:
 
 ```bash
 letterstream-mcp authorize prf_... \
@@ -332,7 +493,7 @@ Exit codes: `0` success, `1` the gate refused, `2` configuration problem,
 
 ## MCP tool surface
 
-Eight tools. Exactly one of them mails.
+Eight tools. `letterstream_authorize` is the only one that mails.
 
 | Tool | Parameters | Returns |
 |---|---|---|
@@ -352,6 +513,23 @@ because those are LetterStream's address-string delimiters and a stray one would
 silently shift every later field — the letter would still mail, just to a
 mangled address.
 
+`coversheet` defaults to `"Y"`. Before you set it to `"N"`, read *A failure the
+gate cannot catch: the envelope window* above — that setting has a documented
+route to delivering mail to the wrong address, and nothing here validates it.
+
+The `proof` object returned by `letterstream_submit` — and by
+`letterstream_get_proof` and `letterstream_list_proofs` — carries `per_doc`: one
+entry per recipient copy, parsed out of LetterStream's response. An entry has
+`id`, the per-document identifier that `letterstream_download_proof_pdfs` and
+`letterstream_tracking` are keyed on, and may also carry `job`, `cost` and
+`tracking`. **`tracking` is not always there.** In the live session the
+certified job's entry carried a tracking number and the first-class job's entry
+had no `tracking` key at all, so a consumer must read it with `.get()` and
+handle its absence rather than indexing into it. Where it is present it is
+present at submit time, while the job is still held, so something outside this
+project can subscribe to USPS notifications for it before `authorize` is ever
+called.
+
 Refusals come back as `{"ok": false, "mailed": false, "error_type": ..., "error": ...}`.
 Only errors this package raises on purpose are converted that way; a genuine
 defect still raises, rather than being disguised as a polite refusal.
@@ -368,9 +546,10 @@ pytest -v
 deliberately trips it, so the block is verified rather than assumed. Every
 transport in the suite is a fake, and the configs backing them point at a
 `.invalid` base URL, a reserved TLD that does not resolve. Two tests spawn child
-processes (the CLI end-to-end check, and the cross-process release race); an
-autouse fixture cannot reach those, so each child installs the same socket block
-itself and drives the same fake transport.
+processes, and an autouse fixture cannot reach those. The release race's children
+install the same socket block themselves and drive the same fake transport; the
+CLI check runs with no credentials and exits before any transport is constructed,
+so there is nothing for it to connect to.
 
 The interesting tests are the safety ones:
 
@@ -384,7 +563,7 @@ The interesting tests are the safety ones:
 | `test_cost.py` | the quote is available before anything is released, and a charge differing from the quote is reported rather than hidden |
 | `test_credentials.py` | missing credentials give a message and exit 2, with no traceback and no transport call; there is no `--live` flag anywhere in the parser |
 | `test_concurrency.py` | six threads authorising one proof release it exactly once, and the other five are told it was already authorised; identical simultaneous submits create one held job; a crash between claiming a release and recording it refuses every caller queued behind it; a caller that cannot get the lock refuses rather than mailing; six independently built gates over one state directory (half of them via a symlink) release it once; four separate processes releasing one proof release it once |
-| `test_repo_hygiene.py` | no absolute home paths, no credential-shaped literals, blank example config, correct `.gitignore` |
+| `test_repo_hygiene.py` | no absolute home paths, no credential-shaped literals, blank example config, correct `.gitignore`, and neither `config.toml` nor `state/` committed |
 
 ### Mutation testing
 

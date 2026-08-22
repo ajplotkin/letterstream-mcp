@@ -31,8 +31,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# `config.toml` and `.env` are excluded because this script copytree()s the whole
+# repository once per mutation. On an operator's machine those files hold live API
+# credentials, and copying them into TMPDIR 26 times per run puts real secrets
+# outside the repository. A killed run would leave them there. The hygiene suite's
+# SKIP_FILES is defence in depth for a genuine source export; it is not a reason to
+# make the copy in the first place.
 EXCLUDE = shutil.ignore_patterns(
-    ".git", "__pycache__", "*.pyc", ".pytest_cache", "state", "proofs", ".venv", "venv"
+    ".git", "__pycache__", "*.pyc", ".pytest_cache", "state", "proofs", ".venv", "venv",
+    "config.toml", "*.config.toml", ".env",
 )
 
 

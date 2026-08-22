@@ -71,6 +71,15 @@ state_dir = ""
 mail_type = ""
 # coversheet: "Y" to have LetterStream generate an addressed coversheet,
 #             "N" if your PDF is already laid out for their window envelopes.
+#
+#             "Y" is the default and the safer choice. If any address appears
+#             in the window area of the PDF, USPS may read that in preference
+#             to the address you supplied through the API. This has happened on
+#             a real mailing: an entire batch went to one wrong address, in a
+#             different state. The proof-then-authorize gate does not catch it,
+#             because the job and its addresses are correct right up to the
+#             point the envelope is filled. Read the envelope-window section of
+#             the README before choosing "N".
 coversheet = ""
 # duplex: "Y" double-sided, "N" single-sided.
 duplex = ""
