@@ -1,0 +1,28 @@
+# Local credentials and operator state — never commit these.
+config.toml
+*.config.toml
+.env
+
+# Runtime state written by the safety gate (proof ledger, idempotency ledger).
+state/
+*.ledger.json
+
+# Downloaded print proofs may contain the document you are about to mail.
+proofs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# OS
+.DS_Store

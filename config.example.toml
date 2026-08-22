@@ -1,0 +1,80 @@
+# letterstream-mcp configuration.
+#
+# Copy this file to `config.toml` and fill in the blanks. `config.toml` is
+# listed in .gitignore and is never read from the repository by default —
+# see [Configuration] in README.md for the search order.
+#
+# Every value below is intentionally blank. There are no defaults that point
+# at a real account, a real sender, or a real recipient.
+
+[credentials]
+# Your LetterStream API identifier and integration key. Obtain these from your
+# own LetterStream account under My Account -> API Information. They are yours;
+# this project ships none and has none.
+#
+# You may leave both blank here and supply them through the environment
+# instead, which is the recommended option on shared machines:
+#   LETTERSTREAM_API_ID
+#   LETTERSTREAM_API_KEY
+#
+# Precedence, highest first: CLI flag, environment variable, this file.
+api_id = ""
+api_key = ""
+
+[api]
+# Base endpoint for the LetterStream integration API. Override only if
+# LetterStream tells you to. Blank means "use the documented default",
+# which is https://www.letterstream.com/apis/index.php
+base_url = ""
+
+# Seconds to wait on any single HTTP request before giving up.
+# Blank or absent means 60.
+timeout_seconds = ""
+
+[safety]
+# THE LIVE SWITCH.
+#
+# false (the default when blank or absent) = dry run. No request of any kind
+# is made to LetterStream. `submit` returns a locally computed proof and
+# `authorize` refuses outright.
+#
+# true = the tools may talk to LetterStream. Even then, `submit` only ever
+# creates a held pre-authorised job; a separate `authorize` call is what
+# releases mail. Setting this to true does not by itself mail anything.
+#
+# There is deliberately no CLI flag and no MCP tool parameter that flips this
+# to true. Set it here, or set LETTERSTREAM_LIVE=true in the environment.
+live = false
+
+# How long a proof stays authorisable, in seconds. After this, `authorize`
+# refuses and you must submit again and re-review. Blank or absent means 86400
+# (24 hours).
+proof_ttl_seconds = ""
+
+# Refuse to authorise a batch whose pre-authorised cost exceeds this many US
+# dollars. Blank or absent means no ceiling is applied. This is a backstop
+# against a mis-typed recipient list, not a substitute for reading the proof.
+max_authorize_cost_usd = ""
+
+[storage]
+# Directory for the proof ledger and the idempotency ledger. Blank or absent
+# means ./state relative to the working directory. This directory holds the
+# record of what you approved; keep it somewhere durable.
+state_dir = ""
+
+[defaults]
+# Optional default mail parameters, applied only when a submit call omits
+# them. Leave blank to be forced to state them explicitly on every submit.
+#
+# mail_type: one of firstclass, firstclass_hse, certified, certnoerr,
+#            postcard, flat, propostcard
+mail_type = ""
+# coversheet: "Y" to have LetterStream generate an addressed coversheet,
+#             "N" if your PDF is already laid out for their window envelopes.
+coversheet = ""
+# duplex: "Y" double-sided, "N" single-sided.
+duplex = ""
+# ink: "B" black, "C" colour.
+ink = ""
+# return_envelope: "N", "Y", or a specific stock code.
+return_envelope = ""
