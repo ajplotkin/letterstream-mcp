@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "letterstream-mcp"
 version = "0.1.0"
-description = "MCP server for LetterStream certified mail, built around a submit/authorize gate for irreversible actions."
+description = "Unofficial, unaffiliated MCP server for the LetterStream mailing API, built around a submit/authorize gate for irreversible actions."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

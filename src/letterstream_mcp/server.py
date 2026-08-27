@@ -43,7 +43,12 @@ def build_server(toolset: ToolSet):  # pragma: no cover - requires the mcp SDK
 
     @server.tool()
     def letterstream_account_status() -> dict[str, Any]:
-        """Fetch LetterStream account status, including prepaid balance."""
+        """Authenticated account status check.
+
+        Observed live to return an authentication confirmation only; no balance,
+        quota, or funding data was present in the response. Do not build a
+        pre-flight funding check on it.
+        """
         return toolset.letterstream_account_status()
 
     @server.tool()
@@ -114,7 +119,13 @@ def build_server(toolset: ToolSet):  # pragma: no cover - requires the mcp SDK
 
     @server.tool()
     def letterstream_tracking(proof_id: str) -> dict[str, Any]:
-        """Fetch USPS tracking for each recipient copy of a submitted job."""
+        """Fetch LetterStream's tracking record for each recipient copy.
+
+        Returns LetterStream's per-document status and history. Observed live
+        against a held job, where it reports document status rather than USPS
+        scan events; whether the history carries USPS scans once a piece is
+        released and delivered has not been verified.
+        """
         return toolset.letterstream_tracking(proof_id=proof_id)
 
     return server

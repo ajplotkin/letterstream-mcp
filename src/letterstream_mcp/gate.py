@@ -589,7 +589,15 @@ class MailGate:
         return written
 
     def tracking(self, proof_id: str) -> list[dict[str, Any]]:
-        """Fetch tracking for each recipient copy. Read-only."""
+        """Fetch LetterStream's tracking/status record per recipient copy. Read-only.
+
+        A failed lookup on any one copy aborts the whole call rather than
+        returning the copies that succeeded. That is deliberate: a partial
+        result reported as a success is the defect this error handling exists
+        to prevent. Returning the partial list under ``ok: false`` would be a
+        defensible alternative; it is simply not what this does. Multi-recipient behaviour here is untested against
+        the live service — every live job so far had a single recipient.
+        """
         self._require_live("tracking")
         proof = self.store.get_proof(proof_id)
         if proof is None:

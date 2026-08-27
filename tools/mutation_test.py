@@ -32,9 +32,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # `config.toml` and `.env` are excluded because this script copytree()s the whole
-# repository once per mutation. On an operator's machine those files hold live API
-# credentials, and copying them into TMPDIR 26 times per run puts real secrets
-# outside the repository. A killed run would leave them there. The hygiene suite's
+# repository once per mutation, plus once for the baseline. On an operator's
+# machine those files hold live API credentials, so copying them would put real
+# secrets outside the repository. A killed run would leave them there. The hygiene suite's
 # SKIP_FILES is defence in depth for a genuine source export; it is not a reason to
 # make the copy in the first place.
 EXCLUDE = shutil.ignore_patterns(
@@ -66,6 +66,103 @@ class Mutation:
 
 
 MUTATIONS: list[Mutation] = [
+    Mutation(
+        identifier="account-status-masks-error-behind-authok",
+        property_broken="an error after a leading AUTHOK fails account status too",
+        relative_path="src/letterstream_mcp/client.py",
+        find="        _raise_for_error_entries(\n            [\n                e\n                for e in parsed.get(\"messages\", [])\n",
+        replace="        _raise_for_error_entries(\n            [\n                e\n                for e in []  # MUTATION: only look at the promoted code\n",
+        expect_failures=[
+            "tests/test_readonly_errors.py::test_account_status_error_behind_a_leading_authok_is_not_masked",
+        ],
+    ),
+    Mutation(
+        identifier="json-guard-accepts-unreadable-type-slot",
+        property_broken="a message entry whose type is unreadable is refused",
+        relative_path="src/letterstream_mcp/client.py",
+        find="        if raw_type is not None and not isinstance(raw_type, str):\n",
+        replace="        if False:  # MUTATION: accept an unreadable type slot\n",
+        expect_failures=[
+            "tests/test_readonly_errors.py::test_malformed_message_entries_are_refused",
+        ],
+    ),
+    Mutation(
+        identifier="xml-fallback-ignores-error-messages",
+        property_broken="an XML error body fails the lookup too",
+        relative_path="src/letterstream_mcp/client.py",
+        find="            errors = [\n                e for e in entries if isinstance(e, dict) and _is_error_type(e.get(\"type\"))\n            ]\n",
+        replace="            errors = []  # MUTATION: ignore XML error messages\n",
+        expect_failures=[
+            "tests/test_readonly_errors.py::test_xml_fallback_refuses_an_error_body",
+        ],
+    ),
+    Mutation(
+        identifier="json-guard-skips-malformed-entries",
+        property_broken="a malformed message entry is refused, not skipped",
+        relative_path="src/letterstream_mcp/client.py",
+        find="        if not isinstance(entry, dict):\n",
+        replace="        if False:  # MUTATION: skip malformed entries\n",
+        expect_failures=[
+            "tests/test_readonly_errors.py::test_malformed_message_entries_are_refused",
+        ],
+    ),
+    Mutation(
+        identifier="readonly-guard-accepts-unreadable-body",
+        property_broken="an unreadable lookup body is refused, not passed through",
+        relative_path="src/letterstream_mcp/client.py",
+        find="    if not isinstance(payload, dict):\n",
+        replace="    if False:  # MUTATION: accept any JSON body\n",
+        expect_failures=[
+            "tests/test_readonly_errors.py::test_unreadable_json_bodies_are_refused_not_passed_through",
+        ],
+    ),
+    Mutation(
+        identifier="readonly-guard-accepts-missing-message-list",
+        property_broken="a body with no readable message list is refused",
+        relative_path="src/letterstream_mcp/client.py",
+        find="    if not isinstance(messages, list) or not messages:\n",
+        replace="    if False:  # MUTATION: tolerate a missing message list\n",
+        expect_failures=[
+            "tests/test_readonly_errors.py::test_unreadable_json_bodies_are_refused_not_passed_through",
+        ],
+    ),
+    Mutation(
+        identifier="readonly-lookup-reports-false-success",
+        property_broken="a read-only lookup never reports success on an error payload",
+        relative_path="src/letterstream_mcp/client.py",
+        find="        raise_for_json_api_error(payload, context=context)\n",
+        replace="",
+        expect_failures=[
+            "tests/test_readonly_errors.py::test_tracking_raises_when_payload_carries_errors",
+            "tests/test_readonly_errors.py::test_tracking_error_is_not_masked_by_the_leading_authok",
+            "tests/test_readonly_errors.py::test_toolset_tracking_surfaces_the_error_as_not_ok",
+        ],
+    ),
+    Mutation(
+        identifier="readonly-guard-reads-only-first-message",
+        property_broken="an error after a leading AUTHOK is still an error",
+        relative_path="src/letterstream_mcp/client.py",
+        find="    if isinstance(messages, dict):\n",
+        replace=(
+            "    messages = messages[:1] if isinstance(messages, list) else messages\n"
+            "    if isinstance(messages, dict):\n"
+        ),
+        expect_failures=[
+            "tests/test_readonly_errors.py::test_tracking_raises_when_payload_carries_errors",
+            "tests/test_readonly_errors.py::test_tracking_error_is_not_masked_by_the_leading_authok",
+            "tests/test_readonly_errors.py::test_toolset_tracking_surfaces_the_error_as_not_ok",
+        ],
+    ),
+    Mutation(
+        identifier="account-status-skips-error-check",
+        property_broken="account status never reports success on an error code",
+        relative_path="src/letterstream_mcp/client.py",
+        find="        raise_for_api_error(parsed, context=context)\n",
+        replace="",
+        expect_failures=[
+            "tests/test_readonly_errors.py::test_account_status_raises_on_a_non_success_code_with_no_error_entry",
+        ],
+    ),
     Mutation(
         identifier="submit-mails-directly",
         property_broken="submit never mails",
@@ -400,9 +497,12 @@ def run_pytest(root: Path) -> tuple[int, set[str], str]:
     output = completed.stdout + completed.stderr
     failed = set()
     for match in FAILURE_LINE.finditer(output):
-        nodeid = match.group(1).split(" ")[0]
         # Drop the parametrisation suffix so "test_x[case1]" matches "test_x".
-        failed.add(re.sub(r"\[.*\]$", "", nodeid))
+        # Cut from the first "[" rather than a trailing "]": a parameter id may
+        # contain a space, and the FAILED line's node id is only captured up to
+        # the first whitespace, so the closing bracket is not always present.
+        nodeid = re.sub(r"\[.*", "", match.group(1)).split(" ")[0]
+        failed.add(nodeid)
     return completed.returncode, failed, output
 
 

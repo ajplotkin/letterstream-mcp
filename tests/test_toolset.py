@@ -209,7 +209,14 @@ def test_a_recipient_without_a_doc_id_is_refused(state_dir, transport, pdf_path)
 def test_tracking_is_read_only(state_dir, transport, pdf_path):
     toolset = _toolset(state_dir, transport, live=True)
     submitted = toolset.letterstream_submit(**_submit_args(pdf_path))
-    transport.query_body = b'{"tracking": "fake-number"}'
+    # The real success shape observed live, not an invented one: a guard that
+    # only recognises this shape must still accept it.
+    transport.query_body = (
+        b'{"apiid": "fake-account", "message": ['
+        b'{"@attributes": {"type": "info"}, "code": "-199", "details": "AUTHOK "},'
+        b'{"@attributes": {"type": "docstatus"}, "id": "doc0001",'
+        b' "job": "TESTJOB0001", "code": "-1", "status": "Needs Attention"}]}'
+    )
 
     result = toolset.letterstream_tracking(proof_id=submitted["proof_id"])
     assert result["ok"] is True

@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("check-config", help="Show resolved configuration. Never prints the key.")
-    sub.add_parser("account", help="Show LetterStream account status and balance.")
+    sub.add_parser("account", help="Authenticated account status check (no balance data observed).")
 
     submit = sub.add_parser(
         "submit", help="Create a held job. Never mails; produces a proof to review."
@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="The dollar amount you expect to be charged. Refused if it disagrees.",
     )
 
-    tracking = sub.add_parser("tracking", help="Fetch USPS tracking for a submitted job.")
+    tracking = sub.add_parser("tracking", help="Fetch LetterStream's tracking/status record for a submitted job.")
     tracking.add_argument("proof_id")
 
     return parser

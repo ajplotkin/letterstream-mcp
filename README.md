@@ -1,5 +1,12 @@
 # letterstream-mcp
 
+> **Unofficial and unaffiliated third-party client.** This is not an official
+> LetterStream SDK. It is not produced, endorsed, supported, or reviewed by
+> LetterStream, and it uses no LetterStream logo or brand asset. LetterStream
+> confirmed by email on 27 August 2026 that customers may publish open-source
+> clients for their API; the exchange and its conditions are recorded under
+> [LetterStream's terms](#letterstreams-terms).
+
 An MCP server for [LetterStream](https://www.letterstream.com/)'s mailing API —
 certified mail, first class, and the other mail types they support. Mailing
 takes two separate calls rather than one, because a letter cannot be recalled
@@ -94,7 +101,7 @@ unclaimed. And, as above, nothing serialises a program that writes
 `proofs.json` directly instead of calling these tools.
 
 One more boundary, because *What has been verified against the live service*
-further down reports a live test and this is not part of it: the races in point
+further down reports the live testing and this is not part of it: the races in point
 5 are run in process against a fake transport. No concurrent call has been made
 to LetterStream. The serialisation claim rests on the suite and the mutation
 harness, not on live evidence.
@@ -192,9 +199,12 @@ window area of every page yourself, and no check in this codebase is watching.
 On 22 August 2026 the CLI was run in live mode against a real LetterStream
 account with real credentials. Two jobs were submitted and released: one page
 and one recipient each, both to the same real postal address, one **certified**
-(quoted $11.01) and one **first class** (quoted $1.19). That is the entire body
-of live evidence — two letters, one address, one session — and every item below
-is bounded by it. The subsection immediately after it is not optional reading.
+(quoted $11.01) and one **first class** (quoted $1.19). Two letters, one
+address, one session — every item in the list below is bounded by that, and the
+subsection immediately after it is not optional reading. A second session on
+27 August verified the read-only tools and recorded one confirmed delivery; it
+has its own
+subsection further down, and its own limits.
 
 - **Authentication works.** The auth digest in this repository was written from
   LetterStream's published documentation rather than copied from an existing
@@ -204,7 +214,10 @@ is bounded by it. The subsection immediately after it is not optional reading.
   a human opened LetterStream's web UI and confirmed the job was sitting there
   unreleased. LetterStream honoured the pre-authorisation flag.
 - **A tracking number exists before authorisation.** The certified job carried a
-  real USPS tracking number while it was still held and unmailed. So the number
+  tracking number while it was still held and unmailed. LetterStream issues it
+  as a USPS tracking number; no USPS lookup has been run against one, so that
+  it is USPS-recognised is LetterStream's representation, not a verified fact
+  here. So the number
   a USPS notification subscription needs is in hand during the review window,
   before anything is committed to the mail stream. Subscribing is still not
   something this project does — see *What it does not do* — but nothing has to
@@ -251,14 +264,82 @@ Kept adjacent on purpose, because the list above is easy to over-read.
 - **Nothing else changed.** The session added no capability. Everything under
   *What it does not do* is still not done.
 
+### A second live session — 27 August 2026
+
+The first session left every read-only tool that calls the live service
+unverified, because nothing had exercised them. All three were run on 27 August 2026 against a job that was
+submitted and deliberately never released. That session mailed nothing, and no charge was
+recorded: the ledger showed `authorized_at: None` and `charged_cost_usd: None`
+throughout, and `authorize` was never called. The ledger records what
+`authorize` reports, and `authorize` never ran — so that is the absence of a
+recorded charge, not an account-side confirmation that none occurred.
+
+- **The certified letter was delivered.** The certified piece released on
+  22 August arrived at the address it was addressed to. Delivery confirmed by
+  physical receipt, for one piece, to an address the sender controls. Nothing
+  here establishes anything about the first-class piece, which carries no
+  tracking, or about delivery times in general.
+- **`letterstream_account_status` authenticates.** It returned `AUTHOK`. Note
+  what it did *not* return: no balance, no quota, no funding state, no account
+  detail of any kind. The tool works; the name promises more than the response
+  carries. Do not build a pre-flight funding check on it.
+- **`letterstream_tracking` answers for a job that is still held.** Run against
+  an unreleased proof it returned a document status for the held doc —
+  `status: "Needs Attention"`, `history: "PreAuth - ..."`. So the endpoint does
+  not require a released job, and this held job surfaced in LetterStream as
+  *Needs Attention*. **But read what came back:** that is LetterStream's own
+  document status, not USPS scan events. Whether the `history` field carries
+  USPS scans once a piece is released and delivered is **still unverified** —
+  the delivered letter's proof had already been deleted from the ledger, so it
+  could not be queried. The tool descriptions used to say "USPS tracking";
+  they have been narrowed to LetterStream's tracking record.
+- **`letterstream_download_proof_pdfs` returns a print-proof PDF.** For the
+  held job it fetched a 43 KB PDF with three page objects, whose extracted text
+  contained the submitted document's text and matched /certif/i. What the two
+  extra pages are was not established, and the page count is a marker count
+  rather than a rendered count. This matters more than the other
+  two: the pages LetterStream reports it will print can be pulled down and read
+  while the job is still held, and only then authorized. Before this, the gate
+  could show you a proof *record*; it is now confirmed that it can show you a
+  proof *document*. What remains untested is whether that document matches what
+  is physically printed — no downloaded proof has ever been compared against a
+  delivered piece.
+
+- **A read-only lookup reported success over a failure — now fixed.** After the
+  held job was deleted at LetterStream, `letterstream_tracking` was run against
+  the same proof. It returned `ok: true` while the payload underneath carried
+  `-924 invalid doc id` and `-999 could not retrieve that info`. The cause was
+  that `raise_for_api_error` was wired into `submit_preauth` and `release` only;
+  the read path never checked. Nothing could mail or charge through this — but a
+  caller reading `ok` would have concluded the lookup succeeded. `tracking` and
+  `account_status` now raise on an error response, covered by the read-only
+  error suite and the nine mutations against `client.py`. `job_status` deliberately still does not raise:
+  `interpret_job_status` reads non-success codes to decide a job is absent, and
+  raising there would make a legitimate resubmission unreachable.
+
+Also confirmed incidentally: a tracking number is issued at submit time on a
+second, independent certified job — so that finding is no longer a single
+observation.
+
+That defect is worth naming plainly, because it is the same shape as the
+concurrency bug this project already found: a property nothing tested, sitting
+behind a full suite of passing tests. It surfaced only because a read-only call
+was made against state that had changed underneath it — which was possible only
+because the credentials and the proof still existed. The previous session never
+ran the read-only tools, and its
+teardown removed the credentials and the proof a failing lookup needed — so
+this defect had no opportunity to surface then.
+
 ## What it does not do
 
-- **It has been run against the live LetterStream API in one session only** —
-  the two letters described above. The test suite itself never touches the
+- **It has been run against the live LetterStream API in two sessions only** —
+  the two letters of 22 August and the single held job of 27 August, both
+  described above. The test suite itself never touches the
   network: every test runs against a fake transport, and the suite blocks
   in-process socket connections so that stays true. The request shapes are built
-  from LetterStream's published integration documentation, and that session
-  confirms the submission and release shapes and nothing wider. In particular
+  from LetterStream's published integration documentation, and those sessions
+  confirm the submission, release, and read-only query shapes and nothing
+  wider. In particular
   the function that decides whether a job already exists
   (`interpret_job_status`) is exercised only against fixtures — its docstring
   says so too.
@@ -411,7 +492,7 @@ tools.
 
 Recipients below are synthetic. The costs in the responses come from the test
 fixtures and the document hashes are invented placeholders; neither comes from
-the live session described above. Start in dry run, which is where you already are, because live mode is
+either live session described above. Start in dry run, which is where you already are, because live mode is
 off by default.
 
 ```bash
@@ -494,7 +575,7 @@ Eight tools. `letterstream_authorize` is the only one that mails.
 | Tool | Parameters | Returns |
 |---|---|---|
 | `letterstream_check_config` | none | `{ok, configured, live, mode, config, state_dir, cross_process_locking, tools}` — `config` reports `api_key_present` and `api_key_length`, never the key; `cross_process_locking` says whether the release lock extends past this process |
-| `letterstream_account_status` | none | `{ok, account_status}` — LetterStream's parsed account/balance response. Read-only. Refuses in dry run |
+| `letterstream_account_status` | none | `{ok, account_status}` — LetterStream's parsed account-status response. Observed live to carry an auth confirmation only, with no balance or funding data. Read-only. Refuses in dry run |
 | `letterstream_submit` | `job_name`, `document_path`, `pages`, `sender`, `recipients`, and optional `mail_type`, `coversheet`, `duplex`, `ink`, `return_envelope`, `idempotency_key` | `{ok, dry_run, live, mailed: false, proof_id, proof, document_sha256, cost_usd, cost_note, preview, note}`. **Never mails.** In dry run `proof_id` is `null` and no proof is written |
 | `letterstream_list_proofs` | none | `{ok, proofs: [...]}` — ledger records, authcode stripped. Local only |
 | `letterstream_get_proof` | `proof_id` | `{ok, proof}` — one record including `document_sha256`, authcode stripped. Local only |
@@ -518,12 +599,12 @@ The `proof` object returned by `letterstream_submit` — and by
 entry per recipient copy, parsed out of LetterStream's response. An entry has
 `id`, the per-document identifier that `letterstream_download_proof_pdfs` and
 `letterstream_tracking` are keyed on, and may also carry `job`, `cost` and
-`tracking`. **`tracking` is not always there.** In the live session the
+`tracking`. **`tracking` is not always there.** In the first live session the
 certified job's entry carried a tracking number and the first-class job's entry
 had no `tracking` key at all, so a consumer must read it with `.get()` and
 handle its absence rather than indexing into it. Where it is present it is
 present at submit time, while the job is still held, so something outside this
-project can subscribe to USPS notifications for it before `authorize` is ever
+project can attempt a USPS notification subscription with it before `authorize` is ever
 called.
 
 Refusals come back as `{"ok": false, "mailed": false, "error_type": ..., "error": ...}`.
@@ -536,7 +617,7 @@ defect still raises, rather than being disguised as a polite refusal.
 pytest -v
 ```
 
-104 tests, no network. An autouse fixture patches the socket entry points
+139 tests, no network. An autouse fixture patches the socket entry points
 `requests` reaches for — `socket.create_connection`, `socket.socket.connect` and
 `socket.socket.connect_ex` — and raises if a test tries to connect; one test
 deliberately trips it, so the block is verified rather than assumed. Every
@@ -574,7 +655,7 @@ python tools/mutation_test.py --list   # list them
 python tools/mutation_test.py -k dry_run
 ```
 
-25 mutations, all currently caught. In full: make `submit` call `release`; make
+34 mutations, all currently caught. In full: make `submit` call `release`; make
 `authorize` skip the on-disk re-hash; make `authorize` trust the caller's hash;
 let dry run fall through to the transport; let dry run authorise; let a second
 `authorize` release again; remove the retry reconciliation; let an
@@ -587,32 +668,55 @@ contended; stop canonicalising the lock path so one state directory maps to two
 locks; do the ledger's read-modify-write unlocked; share one temporary filename
 between atomic writers; let a caller override `preauth`; fall back to a
 default credential; leak the authcode; hide the cost; ignore the cost ceiling;
-stop validating address delimiters. The script exits non-zero if any mutation
+stop validating address delimiters; ignore error messages in an XML lookup
+response; skip a malformed message entry; mask an account-status error behind a leading AUTHOK; accept a message entry
+whose `type` slot is
+unreadable; accept an unreadable lookup body; accept a
+lookup body with no readable message list; let a read-only lookup report success over
+an error payload; have that check read only the first message so an error
+behind a leading `AUTHOK` slips through; skip the error check on account
+status. The script exits non-zero if any mutation
 survives, and refuses to run if the unmutated copy does not pass first.
 
 ## LetterStream's terms
 
-Reported as findings, not as legal advice, and based only on publicly readable
-pages — no API call was made to establish any of this.
+Reported as findings, not as legal advice.
 
-LetterStream's published Terms of Service does not contain the word "API"
-anywhere in the agreement body. It has no developer terms, no API licence grant,
-no rate-limit clause, no anti-automation clause, and no clause about third-party
-clients or competing tools. On the specific question of whether an independent
-open-source API client is permitted, the published terms are **silent** — there
-is no clause permitting it and none prohibiting it.
+**LetterStream was asked directly, and answered.** On 22 August 2026 the author
+emailed LetterStream support three questions: whether customers may publish
+open-source clients for the API, whether API-specific terms exist beyond the
+website Terms of Service, and whether any attribution or naming requirements
+apply. The reply, received 27 August 2026, was:
 
-The one adjacent clause is a proprietary-rights paragraph restricting
-modification, distribution and derivative works of "the Software", which it
-defines as the website and software used in connection with it. Whether that
-definition reaches the HTTP API is ambiguous on the face of the document and is
-**not resolved here**.
+1. Yes — they are happy for customers to publish open-source clients.
+2. There are currently no API-specific terms beyond the standard ToS.
+3. Two conditions: do not use their logo or imply official endorsement, and
+   include a clear "unofficial, unaffiliated third-party client" statement in
+   the README. Naming in the style of `unofficial-letterstream-client` is fine;
+   names implying an official SDK are not.
 
-LetterStream's own integration documentation is only released after account
-approval. Whether separate API terms accompany it is **unverified** — that
-material is behind an account wall and was not accessed for this project. That
-is also the most likely place a redistribution restriction would live, so if you
-deploy this, read the terms attached to your own API grant.
+This repository meets those conditions. The disclaimer is the first thing in
+this file; no LetterStream logo, brand asset, or image of any kind appears
+anywhere in the repository; and nothing here claims official status. The name
+`letterstream-mcp` follows the ordinary `<service>-mcp` convention for MCP
+servers and asserts no official standing, which is the distinction condition 3
+draws.
+
+Two honest qualifications. That reply is a support-desk email, not a signed
+licence grant, and it is recorded here as what was said rather than as a
+permission that binds. And "currently no API-specific terms" is a statement
+about the present; if you deploy this, read whatever terms accompany your own
+API grant.
+
+The published Terms of Service remains silent on APIs. It contains no developer
+terms, no API licence grant, no rate-limit clause, no anti-automation clause,
+and no clause about third-party clients, as published. The one adjacent clause
+is a
+proprietary-rights paragraph restricting modification, distribution, and
+derivative works of "the Software", which it defines as the website and the
+software used in connection with it. Whether that definition reaches the HTTP
+API is ambiguous on the face of the document; the answer to question 2 is what
+resolves it in practice, not a reading of that paragraph.
 
 No LetterStream documentation text, sample code, or proprietary material is
 reproduced in this repository. The request shapes here were written from scratch

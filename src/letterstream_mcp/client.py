@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import time
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
@@ -137,6 +138,101 @@ def raise_for_api_error(parsed: dict[str, Any], *, context: str) -> None:
     raise ApiError(f"{context}: LetterStream returned code {code}. {details}", code=code)
 
 
+ERROR_MESSAGE_TYPE = "error"
+
+
+def _is_error_type(raw: Any) -> bool:
+    """Normalised test for an error message type.
+
+    Shared by the JSON and XML paths deliberately. They read the type from
+    different places — ``@attributes.type`` in JSON, a promoted top-level
+    ``type`` in the XML parser's output — but must agree on what counts as an
+    error. When these were two separate comparisons they drifted: one
+    normalised case and whitespace and the other did not, so ``type="Error"``
+    passed as a success on one path and failed on the other.
+    """
+    return str(raw or "").strip().lower() == ERROR_MESSAGE_TYPE
+
+
+def _raise_for_error_entries(errors: list[dict[str, Any]], *, context: str) -> None:
+    """Raise :class:`ApiError` describing every error entry found."""
+    if not errors:
+        return
+
+    def render(entry: dict[str, Any]) -> str:
+        # `is None` rather than falsiness on both halves: 0 and False are values
+        # LetterStream could legitimately send, and reporting either of them as
+        # "no detail supplied" would be a false statement in an error message.
+        code = entry.get("code")
+        code_text = "?" if code is None else str(code)
+        raw_details = entry.get("details")
+        details = ("" if raw_details is None else str(raw_details)).strip()
+        return f"code {code_text}: {details or 'no detail supplied'}"
+
+    first = errors[0].get("code")
+    raise ApiError(
+        f"{context}: LetterStream returned an error. "
+        + "; ".join(render(entry) for entry in errors),
+        code=str(first) if first is not None else None,
+    )
+
+
+def raise_for_json_api_error(payload: Any, *, context: str) -> None:
+    """Raise :class:`ApiError` unless a JSON response is a recognised success.
+
+    LetterStream's JSON responses wrap a list under ``message``; an error is an
+    entry whose ``@attributes.type`` is ``error``. That shape has no top-level
+    ``code``, so :func:`raise_for_api_error` cannot read it — a successful
+    lookup and a failed one are both a 200 with a JSON body, and the difference
+    is only visible inside the list. A response may carry an ``info`` entry
+    (typically ``AUTHOK``) alongside errors, so one success entry does not mean
+    the request succeeded.
+
+    This recognises exactly one shape, the one observed live. Unknown entry
+    *types* pass (``info``, ``docstatus``, and any benign type LetterStream
+    adds later); malformed entries and unreadable envelopes are refused: reporting success over a body we cannot
+    read is the failure this function exists to prevent, and these lookups are
+    read-only, so a false failure costs a retry while a false success misleads
+    the caller.
+    """
+    if not isinstance(payload, dict):
+        raise ApiError(
+            f"{context}: LetterStream returned a JSON body that is not an "
+            f"object: {str(payload)[:200]}"
+        )
+    messages = payload.get("message")
+    if isinstance(messages, dict):
+        messages = [messages]
+    if not isinstance(messages, list) or not messages:
+        raise ApiError(
+            f"{context}: LetterStream returned a JSON object with no readable "
+            f"'message' list; cannot tell success from failure. "
+            f"Keys: {sorted(payload)[:10]}"
+        )
+    errors = []
+    for entry in messages:
+        if not isinstance(entry, dict):
+            raise ApiError(
+                f"{context}: LetterStream returned a message entry that is not "
+                f"an object: {str(entry)[:200]}"
+            )
+        attrs = entry.get("@attributes")
+        if attrs is not None and not isinstance(attrs, dict):
+            raise ApiError(
+                f"{context}: LetterStream returned a message entry whose "
+                f"'@attributes' is not an object: {str(attrs)[:200]}"
+            )
+        raw_type = (attrs or {}).get("type")
+        if raw_type is not None and not isinstance(raw_type, str):
+            raise ApiError(
+                f"{context}: LetterStream returned a message entry whose "
+                f"'type' is not a string: {str(raw_type)[:200]}"
+            )
+        if _is_error_type(raw_type):
+            errors.append(entry)
+    _raise_for_error_entries(errors, context=context)
+
+
 class LetterStreamClient:
     """Stateless wrapper over a :class:`~letterstream_mcp.transport.Transport`."""
 
@@ -194,9 +290,32 @@ class LetterStreamClient:
     def account_status(self) -> dict[str, Any]:
         fields = self._base_fields()
         fields["accountstatus"] = "1"
-        return parse_response(self.transport.query(fields))
+        parsed = parse_response(self.transport.query(fields))
+        context = "Fetching account status"
+        raise_for_api_error(parsed, context=context)
+        # raise_for_api_error reads only the code promoted to the top level,
+        # which a leading AUTHOK fills in. Scan every message too, so a trailing
+        # error cannot hide behind it — the same masking shape the tracking
+        # path guards against.
+        _raise_for_error_entries(
+            [
+                e
+                for e in parsed.get("messages", [])
+                if isinstance(e, dict) and _is_error_type(e.get("type"))
+            ],
+            context=context,
+        )
+        return parsed
 
     def job_status(self, job_name: str) -> dict[str, Any]:
+        """Fetch a job's status. Deliberately does NOT raise on an error code.
+
+        :func:`~letterstream_mcp.gate.interpret_job_status` reads non-success
+        codes to distinguish "no such job" from "job exists", and its caller
+        turns any exception into a refusal — so raising here would convert a
+        legitimate resubmission-after-failure into a blocked one. The caller
+        interprets the response instead.
+        """
         fields = self._base_fields()
         fields["jobstatus"] = job_name
         return parse_response(self.transport.query(fields))
@@ -207,12 +326,36 @@ class LetterStreamClient:
         fields["getinfo"] = "trackx"
         fields["responseformat"] = "json"
         body = self.transport.query(fields)
+        context = f"Fetching tracking for doc_id {doc_id}"
         try:
-            import json
-
-            return json.loads(body.decode("utf-8"))
+            payload = json.loads(body.decode("utf-8"))
         except Exception:  # noqa: BLE001 - fall back to the XML/text parser
-            return parse_response(body)
+            parsed = parse_response(body)
+            # SUCCESS_CODES holds the submit/release codes and this endpoint's
+            # XML success codes have never been observed, so raise_for_api_error
+            # would reject valid lookups — and it reads only the promoted
+            # top-level code, which a leading AUTHOK would fill in while trailing
+            # error messages went unread. That is the live failure shape. So the
+            # test here is literally the JSON guard's predicate, shared via
+            # _is_error_type so the two paths cannot drift apart.
+            if "raw" in parsed and "messages" not in parsed:
+                raise ApiError(
+                    f"{context}: LetterStream returned an unrecognised body: "
+                    f"{parsed['raw'][:400]}"
+                )
+            entries = parsed.get("messages")
+            if not isinstance(entries, list) or not entries:
+                raise ApiError(
+                    f"{context}: LetterStream returned no readable messages; "
+                    "cannot tell success from failure."
+                )
+            errors = [
+                e for e in entries if isinstance(e, dict) and _is_error_type(e.get("type"))
+            ]
+            _raise_for_error_entries(errors, context=context)
+            return parsed
+        raise_for_json_api_error(payload, context=context)
+        return payload
 
     def document_proof_pdf(self, doc_id: str) -> bytes:
         """Fetch the print proof PDF for one recipient copy.
