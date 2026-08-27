@@ -64,8 +64,7 @@ default account, and cannot obtain them for you.
 
    Leave `coversheet` blank or `"Y"` too. Setting it to `"N"` has a documented
    route to delivering an entire batch to the wrong address — see
-   [the envelope window](#a-failure-the-gate-cannot-catch-the-envelope-window)
-   before you change it.
+   [the envelope window](#a-failure-the-gate-cannot-catch-the-envelope-window).
 
 6. **Check the configuration.**
 
@@ -143,8 +142,8 @@ tools.
 
 Recipients below are synthetic. The costs in the responses come from the test
 fixtures and the document hashes are invented placeholders; neither comes from
-a live session. Start in dry run, which is where you already are, because live
-mode is off by default.
+a live session. Live mode is off by default, so this sequence starts in dry
+run.
 
 ```bash
 letterstream-mcp submit \
@@ -176,8 +175,8 @@ letterstream-mcp submit \
 }
 ```
 
-Read the preview. Then turn live mode on in `config.toml` and run the same
-command. This time LetterStream holds the job and quotes a price:
+After reviewing the preview, turn live mode on in `config.toml` and run the
+same command. This time LetterStream holds the job and quotes a price:
 
 ```jsonc
 {
@@ -241,10 +240,9 @@ because those are LetterStream's address-string delimiters and a stray one would
 silently shift every later field — the letter would still mail, just to a
 mangled address.
 
-`coversheet` defaults to `"Y"`. Before you set it to `"N"`, read
-[A failure the gate cannot catch: the envelope window](#a-failure-the-gate-cannot-catch-the-envelope-window)
-— that setting has a documented
-route to delivering mail to the wrong address, and nothing here validates it.
+`coversheet` defaults to `"Y"`. Setting it to `"N"` has a documented route to
+delivering mail to the wrong address, and nothing here validates it — see
+[A failure the gate cannot catch: the envelope window](#a-failure-the-gate-cannot-catch-the-envelope-window).
 
 The `proof` object returned by `letterstream_submit` — and by
 `letterstream_get_proof` and `letterstream_list_proofs` — carries `per_doc`: one
@@ -307,12 +305,12 @@ the PDF between submit and authorize invalidates the proof. Restoring the exact
 bytes makes it valid again, which is the check that the binding is on content
 rather than on some proxy like mtime.
 
-**5. Two callers cannot both release one proof.** A gate that races is not a
-gate. `authorize` is a check-then-act — it reads that a proof has not been
-released, then releases it — and this server ships inside FastMCP, which
-dispatches synchronous tools on a worker-thread pool, so two overlapping tool
-calls genuinely run it at the same time. That used to be enough to double-mail:
-six threads authorising one valid proof produced six `release` calls. Now
+**5. Two callers cannot both release one proof.** `authorize` is a
+check-then-act — it reads that a proof has not been released, then releases
+it — and this server ships inside FastMCP, which dispatches synchronous tools
+on a worker-thread pool, so two overlapping tool calls run it at the same
+time. That used to be enough to double-mail: six threads authorising one valid
+proof produced six `release` calls. Now
 `authorize` holds an exclusive lock on the proof id across the whole
 read-claim-release-record sequence, and `submit` holds one on the idempotency
 key. The lock is an in-process `threading.RLock` paired with `flock` on a file
@@ -320,8 +318,8 @@ under `state_dir/locks/`, so it holds between threads and between processes.
 A caller that cannot obtain it within `timeout_seconds + 60` raises
 `LockTimeout` and mails nothing rather than proceeding. Each thread race runs
 sixty independent times per test run, and the same property is checked again
-across four separate OS processes. That "cannot" has a scope, and it is narrower
-than "safe under concurrency" — spelled out under *Where the gate stops*, below.
+across four separate OS processes. The scope of that "cannot" is narrower
+than "safe under concurrency" — see *Where the gate stops*.
 
 ### Where the gate stops
 
@@ -329,7 +327,7 @@ This is a guarantee about the tool surface, not about the process. Anything that
 imports `LetterStreamClient` directly, or reads the proof ledger file and calls
 `release` with the authcode it finds there, bypasses all of the above. The
 design assumes the agent is constrained to the MCP tools; it is not a sandbox
-and does not try to be one. Stated plainly so nobody mistakes it for one.
+and does not try to be one.
 
 The serialisation in point 5 has its own boundary. Two scopes hold, and they are
 enforced by different mechanisms: threads inside one process are excluded by a
@@ -341,19 +339,18 @@ without `fcntl` it is `false` and only the in-process half applies. What is
 **not** established here: whether `flock` is honoured for a state directory on
 a network filesystem. Some are, some are not; every test in this repository
 runs against a local temporary directory, so that case is untested and
-unclaimed. And, as above, nothing serialises a program that writes
-`proofs.json` directly instead of calling these tools.
+unclaimed. Nothing serialises a program that writes `proofs.json` directly
+instead of calling these tools.
 
-One more boundary, because *What has been verified against the live service*
-further down reports the live testing and this is not part of it: the races in point
-5 are run in process against a fake transport. No concurrent call has been made
-to LetterStream. The serialisation claim rests on the suite and the mutation
-harness, not on live evidence.
+The races in point 5 are run in process against a fake transport; they are not
+part of the live testing reported under *What has been tested against the live
+service*. No concurrent call has been made to LetterStream. The serialisation
+claim rests on the suite and the mutation harness, not on live evidence.
 
 ### A failure the gate cannot catch: the envelope window
 
-Worth reading even if you skip the rest of this page, because it has actually
-happened and nothing in this repository would have prevented it.
+This failure has occurred, and nothing in this repository would have prevented
+it.
 
 On a real mailing, an entire batch of certified pieces was submitted with
 `coversheet` set to `"N"`, on the reasoning that the PDFs already carried the
@@ -369,16 +366,16 @@ their own addressed coversheet so the window shows the address the API was
 given. `"Y"` is this package's default. It addresses this specific failure mode;
 it is not a general guarantee that a piece arrives where you intended.
 
-Now note what the gate did and did not do. The job was submitted, held,
-reviewed and authorised correctly. The addresses carried through the API were
-right. The cost was right. The tracking numbers were right. The properties this
-repository argues for held — and the mail still went to the wrong state. The
-gate's promise is that nothing is mailed that a human did not approve. It says
+The job was submitted, held, reviewed and authorised correctly. The addresses
+carried through the API were right. The cost was right. The tracking numbers
+were right. The properties this repository argues for held — and the mail still
+went to the wrong state. The gate's promise is that nothing is mailed that a
+human did not approve. It says
 nothing about whether the approved thing is correct once it leaves. A proof PDF
 shows you the page; it does not show you which part of the page will be visible
 through an envelope.
 
-So: if you set `coversheet` to `"N"`, you are taking responsibility for the
+If you set `coversheet` to `"N"`, you are taking responsibility for the
 window area of every page yourself, and no check in this codebase is watching.
 
 ### The other safety properties
@@ -406,14 +403,13 @@ window area of every page yourself, and no check in this codebase is watching.
   submits that arrive together produce one held job rather than two, on the same
   terms as the release lock above.
 
-  One consequence is worth stating, because it can surprise: an explicit
-  `idempotency_key` means "this is the same mailing". Reusing one across two
-  *different* documents returns the first document's proof, and authorising it
-  mails the first document. That is the deduplication working, not a failure —
-  nothing is ever double-mailed, and nothing is ever mailed that a proof did not
-  approve, because the proof still binds to the bytes it was issued for. But if
-  you want a second mailing, give it a different key, or omit the key and let it
-  be derived from the document and recipients.
+  An explicit `idempotency_key` means "this is the same mailing". Reusing one
+  across two *different* documents returns the first document's proof, and
+  authorising it mails the first document. That is the deduplication working,
+  not a failure — nothing is ever double-mailed, and nothing is ever mailed
+  that a proof did not approve, because the proof still binds to the bytes it
+  was issued for. But if you want a second mailing, give it a different key,
+  or omit the key and let it be derived from the document and recipients.
 - **An unconfirmed release is not retried, by a later caller or a queued one.**
   A timestamp is written to the ledger before the release request goes out, and
   while the proof's lock is held. A later `authorize` that sees it without a
@@ -429,9 +425,8 @@ window area of every page yourself, and no check in this codebase is watching.
   told the proof was already authorised; the assertion is on the fake
   transport's `release_calls`, over sixty independent races per run. Within one
   process that holds unconditionally. Across processes it holds wherever `flock`
-  does — see the boundary above, which is not a formality. The sequential half
-  of this has also been observed against the live service; the simultaneous half
-  has not. Both are separated out in the next section.
+  does — see *Where the gate stops*. The sequential half of this has also been
+  observed against the live service; the simultaneous half has not.
 - **Proofs go stale.** Past a configurable TTL (default 24h), `authorize`
   refuses and you must submit and re-review.
 - **Credentials come from you.** There is no key in this repository, no default
@@ -450,7 +445,7 @@ price; that `authorize` releases; that authorising twice mails and charges once;
 that `mail_type` works; that the read-only tools answer. One certified letter
 was delivered.
 
-Four things to know before relying on it:
+Four caveats:
 
 - **The locking is not proven against the live service.** Two callers racing is
   covered by the test suite and mutation harness, in process, against a fake
@@ -458,8 +453,8 @@ Four things to know before relying on it:
 - **`letterstream_tracking` returns LetterStream's document status, not USPS
   scan events.** Whether its `history` carries USPS scans after delivery is
   unknown.
-- **`letterstream_account_status` returns no balance or funding data.** Do not
-  build a pre-flight funding check on it.
+- **`letterstream_account_status` was observed to return no balance or funding
+  data.** Do not build a pre-flight funding check on it.
 - **A tracking number is issued at submit, before authorisation.** LetterStream
   issues it as a USPS number; no USPS lookup has been run against one here.
 
@@ -485,7 +480,7 @@ against fixtures only.
   pre-flight envelope checking. For certified mail it does surface the tracking
   number a subscription would need, at submit time — see the `per_doc` note
   under *MCP tool surface* — but subscribing is left to you.
-- It does not cancel or recall a released job. Nothing here can.
+- It does not cancel or recall a released job; nothing here can.
 - It does not manage LetterStream account funding or test mode. Those are web
   UI settings on your account, and they are an additional layer of protection
   this code does not control and cannot see.
@@ -522,7 +517,7 @@ install the same socket block themselves and drive the same fake transport; the
 CLI check runs with no credentials and exits before any transport is constructed,
 so there is nothing for it to connect to.
 
-The interesting tests are the safety ones:
+The safety tests:
 
 | File | Property |
 |---|---|
@@ -590,7 +585,7 @@ description of the protocol.
 
 Written with Claude. The safety properties are not asserted on that basis — they
 are the ones `tools/mutation_test.py` breaks on purpose, each tied to a named
-test that fails when it does. Run it; that is what the claim rests on.
+test that fails when it does; that harness is what the claim rests on.
 
 ## Licence
 
