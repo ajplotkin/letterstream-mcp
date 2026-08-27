@@ -1,23 +1,267 @@
 # letterstream-mcp
 
-> **Unofficial and unaffiliated third-party client.** This is not an official
-> LetterStream SDK. It is not produced, endorsed, supported, or reviewed by
+> **Unofficial and unaffiliated third-party client.** Not an official
+> LetterStream SDK. Not produced, endorsed, supported, or reviewed by
 > LetterStream, and it uses no LetterStream logo or brand asset. LetterStream
 > confirmed by email on 27 August 2026 that customers may publish open-source
-> clients for their API; the exchange and its conditions are recorded under
-> [LetterStream's terms](#letterstreams-terms).
+> clients for their API — see [LetterStream's terms](#letterstreams-terms).
 
 An MCP server for [LetterStream](https://www.letterstream.com/)'s mailing API —
-certified mail, first class, and the other mail types they support. Mailing
-takes two separate calls rather than one, because a letter cannot be recalled
-once it has been released.
+certified mail, first class, and their other mail types.
 
-The reason for the split is specific. A mailing spends money, puts a physical
-object in the postal system, and can start a statutory clock, and there is no
-endpoint that undoes any of that. A single `send()` gives a caller no point at
-which a wrong address or a retry after a timeout can be caught, so this server
-does not have one: `submit` creates a job LetterStream holds, and a separate
-`authorize` releases it.
+There is no `send()`. Mailing takes two calls: `submit` creates a job
+LetterStream holds and returns a proof — cost, recipients, and a hash of the
+exact file — and a separate `authorize` releases it. A letter cannot be
+recalled, so there is a point in between where a wrong address, an unexpected
+price, or a retry after a timeout can be caught. Dry run is the default.
+
+## Install
+
+```bash
+git clone https://github.com/YOUR-USERNAME/letterstream-mcp.git
+cd letterstream-mcp
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[mcp,dev]'
+```
+
+Python 3.11 or newer. The only runtime dependency is `requests`; `mcp` is needed
+only to run the MCP server, and `pytest` only to run the tests.
+
+## Configuration
+
+### Setup, start to finish
+
+You need your own LetterStream API credentials. This project ships none, has no
+default account, and cannot obtain them for you.
+
+1. **Create a LetterStream account, or sign in to one.** Their public site is
+   [letterstream.com](https://www.letterstream.com/).
+
+2. **Ask LetterStream to enable API access.** It is not on by default. Their
+   published help material describes a review-and-approval step before API
+   access is switched on for an account, and says the API documentation and
+   sample code only become available inside the account after that. Expect a
+   round trip, not an instant self-service key. Their [API
+   page](https://www.letterstream.com/api/) is where that request starts.
+
+3. **Find your API ID and API key under *My Account → API Information*.**
+   LetterStream's publicly readable help pages do not document this path, so if
+   the interface has moved, the interface is right and this line is out of date.
+
+4. **Copy the example config and fill in the two credentials.**
+
+   ```bash
+   cp config.example.toml config.toml
+   ```
+
+   Set `api_id` and `api_key` in the `[credentials]` section. On a shared
+   machine, export `LETTERSTREAM_API_ID` and `LETTERSTREAM_API_KEY` instead, so
+   the key never lands in a file or in shell history.
+
+5. **Leave `live = false` for now.** That is how the example ships. In this
+   state no request of any kind reaches LetterStream: `submit` returns a local
+   preview and `authorize` refuses outright.
+
+   Leave `coversheet` blank or `"Y"` too. Setting it to `"N"` has a documented
+   route to delivering an entire batch to the wrong address — see
+   [the envelope window](#a-failure-the-gate-cannot-catch-the-envelope-window)
+   before you change it.
+
+6. **Check the configuration.**
+
+   ```bash
+   letterstream-mcp check-config
+   ```
+
+   It reports whether credentials were found, which mode you are in, and
+   whether cross-process locking is available. It never prints the key.
+
+7. **Do a dry run first.** Run a real `submit` with `live = false` and read the
+   preview — the sender and recipient block, the document hash, the recipient
+   count. This costs nothing and touches nothing.
+
+8. **Only then set `live = true`.** Edit `[safety] live` in `config.toml`, or
+   set `LETTERSTREAM_LIVE=true`. This is deliberately a separate, manual step:
+   there is no `--live` flag and no MCP tool parameter that can flip it, so
+   neither an agent nor a mistyped command can turn dry run into live mode.
+   Turning it on still does not mail anything by itself — `submit` creates a
+   held job, and `authorize` is what releases it.
+
+`config.toml` is in `.gitignore`. Every credential, path and tuning value in
+`config.example.toml` is blank and documented; the one value that is filled in is
+`live = false`. Copying the example unedited fails with the missing-credentials
+message rather than half-working — there is a test for that.
+
+### Where settings come from
+
+Resolution order, highest priority first:
+
+1. CLI flags (`--api-id`, `--api-key`, `--base-url`, `--state-dir`, `--timeout`)
+2. Environment (`LETTERSTREAM_API_ID`, `LETTERSTREAM_API_KEY`, `LETTERSTREAM_LIVE`,
+   `LETTERSTREAM_BASE_URL`, `LETTERSTREAM_STATE_DIR`, `LETTERSTREAM_TIMEOUT`,
+   `LETTERSTREAM_MCP_CONFIG`)
+3. The config file — `--config PATH`, then `$LETTERSTREAM_MCP_CONFIG`, then
+   `./config.toml`, then `~/.config/letterstream-mcp/config.toml`
+
+`live` is the exception: it is settable only in the config file or via
+`LETTERSTREAM_LIVE`, as in step 8 above.
+
+With nothing configured:
+
+```
+$ letterstream-mcp check-config
+LetterStream API credentials are not configured.
+Looked in: the --api-id/--api-key command line flags; the LETTERSTREAM_API_ID and
+LETTERSTREAM_API_KEY environment variables; a config.toml (searched: config.toml,
+~/.config/letterstream-mcp/config.toml).
+To fix this: copy config.example.toml to config.toml and fill in
+api_id and api_key from your own LetterStream account (My Account ->
+API Information), or export LETTERSTREAM_API_ID and LETTERSTREAM_API_KEY.
+This project ships no credentials and has no default account.
+$ echo $?
+2
+```
+
+### Running as an MCP server
+
+```jsonc
+{
+  "mcpServers": {
+    "letterstream": {
+      "command": "letterstream-mcp-server",
+      "args": ["--config", "/absolute/path/to/config.toml"]
+    }
+  }
+}
+```
+
+The server prints its mode (`live` or `dry-run`) to stderr on startup. If
+credentials are missing it exits 2 with the message above and registers no
+tools.
+
+## Worked example
+
+Recipients below are synthetic. The costs in the responses come from the test
+fixtures and the document hashes are invented placeholders; neither comes from
+a live session. Start in dry run, which is where you already are, because live
+mode is off by default.
+
+```bash
+letterstream-mcp submit \
+  --job-name DEMOJOB0001 \
+  --document ./letter.pdf \
+  --pages 1 \
+  --mail-type certified \
+  --sender '{"name_1":"Testcorp Holdings","address_1":"1 Example Plaza","city":"Faketown","state":"AZ","zip_code":"99999"}' \
+  --recipient '{"doc_id":"DEMODOC0001","name_1":"Placeholder Bank NA","address_1":"2 Nowhere Road","city":"Faketown","state":"AZ","zip_code":"99999"}'
+```
+
+```jsonc
+// abridged; the full response also carries "ok", "live" and "idempotency_key"
+{
+  "dry_run": true,
+  "mailed": false,
+  "proof_id": null,
+  "document_sha256": "cfa3181c1ee36e8bce5e39f84959f4558ea7ba32c0e4539a8ab3c8ce8c716ec6",
+  "cost_usd": null,
+  "cost_note": "No cost is available in dry run. LetterStream quotes the price when a job is held, and no request was made.",
+  "preview": {
+    "sender": "Testcorp Holdings / 1 Example Plaza / Faketown, AZ 99999",
+    "recipients": [
+      { "doc_id": "DEMODOC0001", "address": "Placeholder Bank NA / 2 Nowhere Road / Faketown, AZ 99999" }
+    ],
+    "recipient_count": 1
+  },
+  "note": "Dry run: nothing was sent to LetterStream. Set [safety] live = true in config.toml, or LETTERSTREAM_LIVE=true, to create a held job."
+}
+```
+
+Read the preview. Then turn live mode on in `config.toml` and run the same
+command. This time LetterStream holds the job and quotes a price:
+
+```jsonc
+{
+  "dry_run": false,
+  "mailed": false,
+  "proof_id": "prf_...",
+  "document_sha256": "cfa3181c...",
+  "cost_usd": 10.89,
+  "cost_note": "Quoted by LetterStream for the held job. This is what authorize will charge.",
+  "note": "Job is held at LetterStream and has not been mailed. Review the proof, then call authorize with this proof_id and document_sha256 to release it."
+}
+```
+
+Download and read what will actually be printed:
+
+```bash
+letterstream-mcp download-proofs prf_... --out-dir ./proofs
+```
+
+Once you have read the proof and are satisfied with it, authorize:
+
+```bash
+letterstream-mcp authorize prf_... \
+  --document-sha256 cfa3181c... \
+  --acknowledge-cost 10.89
+```
+
+If you edited the PDF in between, that last command refuses:
+
+```jsonc
+{
+  "ok": false,
+  "mailed": false,
+  "error_type": "ProofMismatch",
+  "error": "/path/to/letter.pdf has changed since it was submitted.\n  approved: cfa3181c...\n  on disk : 9d21ab40...\nThe proof approved the earlier bytes, so it does not authorise these. Nothing was released. Submit the current document again and review the new proof."
+}
+```
+
+Exit codes: `0` success, `1` the gate refused, `2` configuration problem,
+`3` other error.
+
+## MCP tool surface
+
+Eight tools. `letterstream_authorize` is the only one that mails.
+
+| Tool | Parameters | Returns |
+|---|---|---|
+| `letterstream_check_config` | none | `{ok, configured, live, mode, config, state_dir, cross_process_locking, tools}` — `config` reports `api_key_present` and `api_key_length`, never the key; `cross_process_locking` says whether the release lock extends past this process |
+| `letterstream_account_status` | none | `{ok, account_status}` — LetterStream's parsed account-status response. Observed live to carry an auth confirmation only, with no balance or funding data. Read-only. Refuses in dry run |
+| `letterstream_submit` | `job_name`, `document_path`, `pages`, `sender`, `recipients`, and optional `mail_type`, `coversheet`, `duplex`, `ink`, `return_envelope`, `idempotency_key` | `{ok, dry_run, live, mailed: false, proof_id, proof, document_sha256, cost_usd, cost_note, preview, note}`. **Never mails.** In dry run `proof_id` is `null` and no proof is written |
+| `letterstream_list_proofs` | none | `{ok, proofs: [...]}` — ledger records, authcode stripped. Local only |
+| `letterstream_get_proof` | `proof_id` | `{ok, proof}` — one record including `document_sha256`, authcode stripped. Local only |
+| `letterstream_download_proof_pdfs` | `proof_id`, `out_dir` | `{ok, files: [paths]}` — LetterStream's print proofs. Read-only. Refuses in dry run |
+| `letterstream_authorize` | `proof_id`, `document_sha256`, optional `acknowledge_cost_usd` | `{ok, mailed, already_authorized, proof_id, job_name, recipient_count, quoted_cost_usd, charged_cost_usd, cost_matches_quote, response_code, response, note}`. **This mails.** Refuses in dry run |
+| `letterstream_tracking` | `proof_id` | `{ok, tracking: [{doc_id, tracking}]}` — read-only. Refuses in dry run |
+
+`sender` is an object with `name_1`, `address_1`, `city`, `state`, `zip_code`
+required and `name_2`, `address_2` optional. Each entry in `recipients` is the
+same shape plus a required `doc_id`. Address fields may not contain `:` or `|`,
+because those are LetterStream's address-string delimiters and a stray one would
+silently shift every later field — the letter would still mail, just to a
+mangled address.
+
+`coversheet` defaults to `"Y"`. Before you set it to `"N"`, read
+[A failure the gate cannot catch: the envelope window](#a-failure-the-gate-cannot-catch-the-envelope-window)
+— that setting has a documented
+route to delivering mail to the wrong address, and nothing here validates it.
+
+The `proof` object returned by `letterstream_submit` — and by
+`letterstream_get_proof` and `letterstream_list_proofs` — carries `per_doc`: one
+entry per recipient copy, parsed out of LetterStream's response. An entry has
+`id`, the per-document identifier that `letterstream_download_proof_pdfs` and
+`letterstream_tracking` are keyed on, and may also carry `job`, `cost` and
+`tracking`. **`tracking` is not always there.** In the first live session the
+certified job's entry carried a tracking number and the first-class job's entry
+had no `tracking` key at all, so a consumer must read it with `.get()` and
+handle its absence rather than indexing into it. Where it is present it is
+present at submit time, while the job is still held, so something outside this
+project can attempt a USPS notification subscription with it before `authorize` is ever
+called.
+
+Refusals come back as `{"ok": false, "mailed": false, "error_type": ..., "error": ...}`.
+Only errors this package raises on purpose are converted that way; a genuine
+defect still raises, rather than being disguised as a polite refusal.
 
 ## The gate
 
@@ -196,56 +440,31 @@ window area of every page yourself, and no check in this codebase is watching.
 
 ## What has been tested against the live service
 
-Everything below comes from two sessions in August 2026: two letters submitted
-and released, and one job submitted and deliberately never released. Three jobs,
-one recipient each, one postal address. Every claim is bounded by that.
+Two sessions in August 2026: two letters submitted and released, and one job
+submitted and deliberately never released. Three jobs, one recipient each, one
+address. The test suite itself never touches the network.
 
-**Verified:**
+Confirmed live: authentication; that `submit` leaves a job held and unmailed
+(checked by eye in LetterStream's web UI); that the quoted price is the charged
+price; that `authorize` releases; that authorising twice mails and charges once;
+that `mail_type` works; that the read-only tools answer. One certified letter
+was delivered.
 
-- The auth digest here was written from LetterStream's published documentation
-  rather than copied from an existing client, and the service accepted it.
-- `submit` creates a job that is held and not mailed — confirmed by eye in
-  LetterStream's web UI, unreleased, after `submit` returned.
-- The amount `authorize` reported as charged equalled the amount `submit`
-  quoted, on both released jobs.
-- `authorize` releases the job.
-- A second `authorize` on the same proof does not mail or charge again: it
-  returns the recorded response and never reaches the transport. Sequentially —
-  no concurrent call was made to the live service.
-- `mail_type` works: certified and first class both went through, priced
-  differently.
-- A different document is not deduplicated against an earlier one.
-- A certified job carries a tracking number while still held and unmailed, on
-  two independent jobs. LetterStream issues it as a USPS tracking number; no
-  USPS lookup has been run against one, so that is their representation rather
-  than a fact established here.
-- `letterstream_account_status` authenticates and returns `AUTHOK`. It returns
-  no balance, quota, or funding data — do not build a pre-flight funding check
-  on it.
-- `letterstream_tracking` answers for a job that is still held, returning
-  LetterStream's document status and history.
-- `letterstream_download_proof_pdfs` returns a print-proof PDF for a held job.
-- One certified letter was delivered, to an address the sender controls.
+Four things to know before relying on it:
 
-**Not verified:**
+- **The locking is not proven against the live service.** Two callers racing is
+  covered by the test suite and mutation harness, in process, against a fake
+  transport. No concurrent live call has been made.
+- **`letterstream_tracking` returns LetterStream's document status, not USPS
+  scan events.** Whether its `history` carries USPS scans after delivery is
+  unknown.
+- **`letterstream_account_status` returns no balance or funding data.** Do not
+  build a pre-flight funding check on it.
+- **A tracking number is issued at submit, before authorisation.** LetterStream
+  issues it as a USPS number; no USPS lookup has been run against one here.
 
-- **Concurrency.** The locking claims on this page rest on the test suite and
-  the mutation harness, in process, against a fake transport.
-- **`interpret_job_status`.** Fixtures only. Its one call site is a resubmission
-  after an attempt failed to report back, and no such failure was provoked.
-- **The document-hash check, live.** It is purely local — `authorize` re-hashes
-  the file and compares before any transport call — so no service behaviour is
-  involved. Covered by `test_tampering.py` and two mutations.
-- **USPS scan events.** What `letterstream_tracking` returns is LetterStream's
-  document status, not USPS scans. Whether its `history` carries scans after a
-  piece is delivered is unknown.
-- **Whether a downloaded proof matches what is physically printed.** No proof
-  has been compared against a delivered piece.
-- **First-class delivery**, which carries no tracking, and delivery times in
-  general.
-- **That nothing was charged for the held job.** The ledger recorded no charge,
-  but the ledger records what `authorize` reports and `authorize` never ran.
-  That is an absent record, not an account-side confirmation.
+`interpret_job_status` — the retry-after-network-failure path — is exercised
+against fixtures only.
 
 ## What it does not do
 
@@ -285,248 +504,6 @@ one recipient each, one postal address. Every claim is bounded by that.
 - The proof ledger on disk is a local trust root. Anything able to write to
   `state/` can forge a proof, and anything able to read it holds the authcodes.
   Put it somewhere only you can write.
-
-## Install
-
-```bash
-git clone https://github.com/YOUR-USERNAME/letterstream-mcp.git
-cd letterstream-mcp
-python -m venv .venv && source .venv/bin/activate
-pip install -e '.[mcp,dev]'
-```
-
-Python 3.11 or newer. The only runtime dependency is `requests`; `mcp` is needed
-only to run the MCP server, and `pytest` only to run the tests.
-
-## Configuration
-
-### Setup, start to finish
-
-You need your own LetterStream API credentials. This project ships none, has no
-default account, and cannot obtain them for you.
-
-1. **Create a LetterStream account, or sign in to one.** Their public site is
-   [letterstream.com](https://www.letterstream.com/).
-
-2. **Ask LetterStream to enable API access.** It is not on by default. Their
-   published help material describes a review-and-approval step before API
-   access is switched on for an account, and says the API documentation and
-   sample code only become available inside the account after that. Expect a
-   round trip, not an instant self-service key. Their [API
-   page](https://www.letterstream.com/api/) is where that request starts.
-
-3. **Find your API ID and API key under *My Account → API Information*.**
-   LetterStream's publicly readable help pages do not document this path, so if
-   the interface has moved, the interface is right and this line is out of date.
-
-4. **Copy the example config and fill in the two credentials.**
-
-   ```bash
-   cp config.example.toml config.toml
-   ```
-
-   Set `api_id` and `api_key` in the `[credentials]` section. On a shared
-   machine, export `LETTERSTREAM_API_ID` and `LETTERSTREAM_API_KEY` instead, so
-   the key never lands in a file or in shell history.
-
-5. **Leave `live = false` for now.** That is how the example ships. In this
-   state no request of any kind reaches LetterStream: `submit` returns a local
-   preview and `authorize` refuses outright.
-
-6. **Check the configuration.**
-
-   ```bash
-   letterstream-mcp check-config
-   ```
-
-   It reports whether credentials were found, which mode you are in, and
-   whether cross-process locking is available. It never prints the key.
-
-7. **Do a dry run first.** Run a real `submit` with `live = false` and read the
-   preview — the sender and recipient block, the document hash, the recipient
-   count. This costs nothing and touches nothing.
-
-8. **Only then set `live = true`.** Edit `[safety] live` in `config.toml`, or
-   set `LETTERSTREAM_LIVE=true`. This is deliberately a separate, manual step:
-   there is no `--live` flag and no MCP tool parameter that can flip it, so
-   neither an agent nor a mistyped command can turn dry run into live mode.
-   Turning it on still does not mail anything by itself — `submit` creates a
-   held job, and `authorize` is what releases it.
-
-`config.toml` is in `.gitignore`. Every credential, path and tuning value in
-`config.example.toml` is blank and documented; the one value that is filled in is
-`live = false`. Copying the example unedited fails with the missing-credentials
-message rather than half-working — there is a test for that.
-
-### Where settings come from
-
-Resolution order, highest priority first:
-
-1. CLI flags (`--api-id`, `--api-key`, `--base-url`, `--state-dir`, `--timeout`)
-2. Environment (`LETTERSTREAM_API_ID`, `LETTERSTREAM_API_KEY`, `LETTERSTREAM_LIVE`,
-   `LETTERSTREAM_BASE_URL`, `LETTERSTREAM_STATE_DIR`, `LETTERSTREAM_TIMEOUT`,
-   `LETTERSTREAM_MCP_CONFIG`)
-3. The config file — `--config PATH`, then `$LETTERSTREAM_MCP_CONFIG`, then
-   `./config.toml`, then `~/.config/letterstream-mcp/config.toml`
-
-`live` is the exception: it is settable only in the config file or via
-`LETTERSTREAM_LIVE`, as in step 8 above.
-
-With nothing configured:
-
-```
-$ letterstream-mcp check-config
-LetterStream API credentials are not configured.
-Looked in: the --api-id/--api-key command line flags; the LETTERSTREAM_API_ID and
-LETTERSTREAM_API_KEY environment variables; a config.toml (searched: config.toml,
-~/.config/letterstream-mcp/config.toml).
-To fix this: copy config.example.toml to config.toml and fill in
-api_id and api_key from your own LetterStream account (My Account ->
-API Information), or export LETTERSTREAM_API_ID and LETTERSTREAM_API_KEY.
-This project ships no credentials and has no default account.
-$ echo $?
-2
-```
-
-### Running as an MCP server
-
-```jsonc
-{
-  "mcpServers": {
-    "letterstream": {
-      "command": "letterstream-mcp-server",
-      "args": ["--config", "/absolute/path/to/config.toml"]
-    }
-  }
-}
-```
-
-The server prints its mode (`live` or `dry-run`) to stderr on startup. If
-credentials are missing it exits 2 with the message above and registers no
-tools.
-
-## Worked example
-
-Recipients below are synthetic. The costs in the responses come from the test
-fixtures and the document hashes are invented placeholders; neither comes from
-either live session described above. Start in dry run, which is where you already are, because live mode is
-off by default.
-
-```bash
-letterstream-mcp submit \
-  --job-name DEMOJOB0001 \
-  --document ./letter.pdf \
-  --pages 1 \
-  --mail-type certified \
-  --sender '{"name_1":"Testcorp Holdings","address_1":"1 Example Plaza","city":"Faketown","state":"AZ","zip_code":"99999"}' \
-  --recipient '{"doc_id":"DEMODOC0001","name_1":"Placeholder Bank NA","address_1":"2 Nowhere Road","city":"Faketown","state":"AZ","zip_code":"99999"}'
-```
-
-```jsonc
-// abridged; the full response also carries "ok", "live" and "idempotency_key"
-{
-  "dry_run": true,
-  "mailed": false,
-  "proof_id": null,
-  "document_sha256": "cfa3181c1ee36e8bce5e39f84959f4558ea7ba32c0e4539a8ab3c8ce8c716ec6",
-  "cost_usd": null,
-  "cost_note": "No cost is available in dry run. LetterStream quotes the price when a job is held, and no request was made.",
-  "preview": {
-    "sender": "Testcorp Holdings / 1 Example Plaza / Faketown, AZ 99999",
-    "recipients": [
-      { "doc_id": "DEMODOC0001", "address": "Placeholder Bank NA / 2 Nowhere Road / Faketown, AZ 99999" }
-    ],
-    "recipient_count": 1
-  },
-  "note": "Dry run: nothing was sent to LetterStream. Set [safety] live = true in config.toml, or LETTERSTREAM_LIVE=true, to create a held job."
-}
-```
-
-Read the preview. Then turn live mode on in `config.toml` and run the same
-command. This time LetterStream holds the job and quotes a price:
-
-```jsonc
-{
-  "dry_run": false,
-  "mailed": false,
-  "proof_id": "prf_...",
-  "document_sha256": "cfa3181c...",
-  "cost_usd": 10.89,
-  "cost_note": "Quoted by LetterStream for the held job. This is what authorize will charge.",
-  "note": "Job is held at LetterStream and has not been mailed. Review the proof, then call authorize with this proof_id and document_sha256 to release it."
-}
-```
-
-Download and read what will actually be printed:
-
-```bash
-letterstream-mcp download-proofs prf_... --out-dir ./proofs
-```
-
-Once you have read the proof and are satisfied with it, authorize:
-
-```bash
-letterstream-mcp authorize prf_... \
-  --document-sha256 cfa3181c... \
-  --acknowledge-cost 10.89
-```
-
-If you edited the PDF in between, that last command refuses:
-
-```jsonc
-{
-  "ok": false,
-  "mailed": false,
-  "error_type": "ProofMismatch",
-  "error": "/path/to/letter.pdf has changed since it was submitted.\n  approved: cfa3181c...\n  on disk : 9d21ab40...\nThe proof approved the earlier bytes, so it does not authorise these. Nothing was released. Submit the current document again and review the new proof."
-}
-```
-
-Exit codes: `0` success, `1` the gate refused, `2` configuration problem,
-`3` other error.
-
-## MCP tool surface
-
-Eight tools. `letterstream_authorize` is the only one that mails.
-
-| Tool | Parameters | Returns |
-|---|---|---|
-| `letterstream_check_config` | none | `{ok, configured, live, mode, config, state_dir, cross_process_locking, tools}` — `config` reports `api_key_present` and `api_key_length`, never the key; `cross_process_locking` says whether the release lock extends past this process |
-| `letterstream_account_status` | none | `{ok, account_status}` — LetterStream's parsed account-status response. Observed live to carry an auth confirmation only, with no balance or funding data. Read-only. Refuses in dry run |
-| `letterstream_submit` | `job_name`, `document_path`, `pages`, `sender`, `recipients`, and optional `mail_type`, `coversheet`, `duplex`, `ink`, `return_envelope`, `idempotency_key` | `{ok, dry_run, live, mailed: false, proof_id, proof, document_sha256, cost_usd, cost_note, preview, note}`. **Never mails.** In dry run `proof_id` is `null` and no proof is written |
-| `letterstream_list_proofs` | none | `{ok, proofs: [...]}` — ledger records, authcode stripped. Local only |
-| `letterstream_get_proof` | `proof_id` | `{ok, proof}` — one record including `document_sha256`, authcode stripped. Local only |
-| `letterstream_download_proof_pdfs` | `proof_id`, `out_dir` | `{ok, files: [paths]}` — LetterStream's print proofs. Read-only. Refuses in dry run |
-| `letterstream_authorize` | `proof_id`, `document_sha256`, optional `acknowledge_cost_usd` | `{ok, mailed, already_authorized, proof_id, job_name, recipient_count, quoted_cost_usd, charged_cost_usd, cost_matches_quote, response_code, response, note}`. **This mails.** Refuses in dry run |
-| `letterstream_tracking` | `proof_id` | `{ok, tracking: [{doc_id, tracking}]}` — read-only. Refuses in dry run |
-
-`sender` is an object with `name_1`, `address_1`, `city`, `state`, `zip_code`
-required and `name_2`, `address_2` optional. Each entry in `recipients` is the
-same shape plus a required `doc_id`. Address fields may not contain `:` or `|`,
-because those are LetterStream's address-string delimiters and a stray one would
-silently shift every later field — the letter would still mail, just to a
-mangled address.
-
-`coversheet` defaults to `"Y"`. Before you set it to `"N"`, read *A failure the
-gate cannot catch: the envelope window* above — that setting has a documented
-route to delivering mail to the wrong address, and nothing here validates it.
-
-The `proof` object returned by `letterstream_submit` — and by
-`letterstream_get_proof` and `letterstream_list_proofs` — carries `per_doc`: one
-entry per recipient copy, parsed out of LetterStream's response. An entry has
-`id`, the per-document identifier that `letterstream_download_proof_pdfs` and
-`letterstream_tracking` are keyed on, and may also carry `job`, `cost` and
-`tracking`. **`tracking` is not always there.** In the first live session the
-certified job's entry carried a tracking number and the first-class job's entry
-had no `tracking` key at all, so a consumer must read it with `.get()` and
-handle its absence rather than indexing into it. Where it is present it is
-present at submit time, while the job is still held, so something outside this
-project can attempt a USPS notification subscription with it before `authorize` is ever
-called.
-
-Refusals come back as `{"ok": false, "mailed": false, "error_type": ..., "error": ...}`.
-Only errors this package raises on purpose are converted that way; a genuine
-defect still raises, rather than being disguised as a polite refusal.
 
 ## Tests
 
