@@ -199,12 +199,10 @@ window area of every page yourself, and no check in this codebase is watching.
 On 22 August 2026 the CLI was run in live mode against a real LetterStream
 account with real credentials. Two jobs were submitted and released: one page
 and one recipient each, both to the same real postal address, one **certified**
-(quoted $11.01) and one **first class** (quoted $1.19). Two letters, one
-address, one session — every item in the list below is bounded by that, and the
-subsection immediately after it is not optional reading. A second session on
-27 August verified the read-only tools and recorded one confirmed delivery; it
-has its own
-subsection further down, and its own limits.
+(quoted $11.01) and one **first class** (quoted $1.19). Two letters, one address,
+one session; every item below is bounded by that. A second session on 27 August
+verified the read-only tools and recorded one confirmed delivery, in its own
+subsection below.
 
 - **Authentication works.** The auth digest in this repository was written from
   LetterStream's published documentation rather than copied from an existing
@@ -240,8 +238,6 @@ subsection further down, and its own limits.
   proof.
 
 ### What that session did not establish
-
-Kept adjacent on purpose, because the list above is easy to over-read.
 
 - **Concurrency was not exercised live.** The claims on this page about two
   callers racing — the release lock, the submit lock, six threads, four
@@ -297,13 +293,10 @@ recorded charge, not an account-side confirmation that none occurred.
   held job it fetched a 43 KB PDF with three page objects, whose extracted text
   contained the submitted document's text and matched /certif/i. What the two
   extra pages are was not established, and the page count is a marker count
-  rather than a rendered count. This matters more than the other
-  two: the pages LetterStream reports it will print can be pulled down and read
-  while the job is still held, and only then authorized. Before this, the gate
-  could show you a proof *record*; it is now confirmed that it can show you a
-  proof *document*. What remains untested is whether that document matches what
-  is physically printed — no downloaded proof has ever been compared against a
-  delivered piece.
+  rather than a rendered count. The proof document can be read while the job is
+  still held, and only then authorized. Whether it matches what is physically
+  printed is untested: no downloaded proof has been compared against a delivered
+  piece.
 
 - **A read-only lookup reported success over a failure — now fixed.** After the
   held job was deleted at LetterStream, `letterstream_tracking` was run against
@@ -313,22 +306,14 @@ recorded charge, not an account-side confirmation that none occurred.
   the read path never checked. Nothing could mail or charge through this — but a
   caller reading `ok` would have concluded the lookup succeeded. `tracking` and
   `account_status` now raise on an error response, covered by the read-only
-  error suite and the nine mutations against `client.py`. `job_status` deliberately still does not raise:
+  error suite and the nine mutations against `client.py`. `job_status`
+  deliberately still does not raise:
   `interpret_job_status` reads non-success codes to decide a job is absent, and
   raising there would make a legitimate resubmission unreachable.
 
 Also confirmed incidentally: a tracking number is issued at submit time on a
 second, independent certified job — so that finding is no longer a single
 observation.
-
-That defect is worth naming plainly, because it is the same shape as the
-concurrency bug this project already found: a property nothing tested, sitting
-behind a full suite of passing tests. It surfaced only because a read-only call
-was made against state that had changed underneath it — which was possible only
-because the credentials and the proof still existed. The previous session never
-ran the read-only tools, and its
-teardown removed the credentials and the proof a failing lookup needed — so
-this defect had no opportunity to surface then.
 
 ## What it does not do
 
