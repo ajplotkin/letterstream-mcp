@@ -12,8 +12,8 @@ certified mail, first class, and their other mail types.
 There is no `send()`. Mailing takes two calls: `submit` creates a job
 LetterStream holds and returns a proof — cost, recipients, and a hash of the
 exact file — and a separate `authorize` releases it. A letter cannot be
-recalled, so there is a point in between where a wrong address, an unexpected
-price, or a retry after a timeout can be caught. Dry run is the default.
+recalled, so the pause between the two calls is where you catch a wrong address,
+an unexpected price, or a retry after a timeout. Dry run is the default.
 
 ## Install
 
@@ -62,9 +62,9 @@ default account, and cannot obtain them for you.
    state no request of any kind reaches LetterStream: `submit` returns a local
    preview and `authorize` refuses outright.
 
-   Leave `coversheet` blank or `"Y"` too. Setting it to `"N"` has a documented
-   route to delivering an entire batch to the wrong address — see
-   [the envelope window](#a-failure-the-gate-cannot-catch-the-envelope-window).
+   Leave `coversheet` blank or `"Y"` too. Setting it to `"N"` has delivered an
+   entire batch to one wrong address on a real mailing — see
+   [Envelope windows](#envelope-windows-setting-coversheet-to-n-can-misdeliver-a-whole-batch).
 
 6. **Check the configuration.**
 
@@ -240,9 +240,9 @@ because those are LetterStream's address-string delimiters and a stray one would
 silently shift every later field — the letter would still mail, just to a
 mangled address.
 
-`coversheet` defaults to `"Y"`. Setting it to `"N"` has a documented route to
-delivering mail to the wrong address, and nothing here validates it — see
-[A failure the gate cannot catch: the envelope window](#a-failure-the-gate-cannot-catch-the-envelope-window).
+`coversheet` defaults to `"Y"`. Setting it to `"N"` has delivered mail to the
+wrong address on a real mailing, and nothing here validates it — see
+[Envelope windows](#envelope-windows-setting-coversheet-to-n-can-misdeliver-a-whole-batch).
 
 The `proof` object returned by `letterstream_submit` — and by
 `letterstream_get_proof` and `letterstream_list_proofs` — carries `per_doc`: one
@@ -261,7 +261,7 @@ Refusals come back as `{"ok": false, "mailed": false, "error_type": ..., "error"
 Only errors this package raises on purpose are converted that way; a genuine
 defect still raises, rather than being disguised as a polite refusal.
 
-## The gate
+## The gate: `submit` holds the job, `authorize` mails it
 
 Mailing is split into two calls that cannot be collapsed into one.
 
@@ -277,7 +277,7 @@ authorize ──▶ takes the proof id and the hash the caller approved,
               and releases the job only if everything still matches
 ```
 
-Five things make that a gate rather than a two-step convenience:
+Five things keep the two calls apart:
 
 **1. `submit` calls a different transport method than `authorize` does.**
 The transport exposes `submit_preauth`, `release`, and `query` as three named
@@ -299,7 +299,7 @@ stored locally and stripped from every return value. An agent holding a `submit`
 result cannot assemble a release request from it — the only route is back
 through `authorize`, which re-checks the hash.
 
-**4. The proof is bound to content, not to intent.** `authorize` requires the
+**4. The proof is bound to the document's exact bytes.** `authorize` requires the
 caller to restate the document hash *and* re-hashes the file on disk. Editing
 the PDF between submit and authorize invalidates the proof. Restoring the exact
 bytes makes it valid again, which is the check that the binding is on content
@@ -314,14 +314,15 @@ proof produced six `release` calls. Now
 `authorize` holds an exclusive lock on the proof id across the whole
 read-claim-release-record sequence, and `submit` holds one on the idempotency
 key. The lock is an in-process `threading.RLock` paired with `flock` on a file
-under `state_dir/locks/`, so it holds between threads and between processes.
-A caller that cannot obtain it within `timeout_seconds + 60` raises
+under `state_dir/locks/`, so it holds between threads, and between processes
+wherever `flock` does — see *What the gate does not cover* for where it does
+not. A caller that cannot obtain it within `timeout_seconds + 60` raises
 `LockTimeout` and mails nothing rather than proceeding. Each thread race runs
 sixty independent times per test run, and the same property is checked again
 across four separate OS processes. The scope of that "cannot" is narrower
-than "safe under concurrency" — see *Where the gate stops*.
+than "safe under concurrency" — see *What the gate does not cover*.
 
-### Where the gate stops
+### What the gate does not cover
 
 This is a guarantee about the tool surface, not about the process. Anything that
 imports `LetterStreamClient` directly, or reads the proof ledger file and calls
@@ -347,36 +348,43 @@ part of the live testing reported under *What has been tested against the live
 service*. No concurrent call has been made to LetterStream. The serialisation
 claim rests on the suite and the mutation harness, not on live evidence.
 
-### A failure the gate cannot catch: the envelope window
+### Envelope windows: setting `coversheet` to `"N"` can misdeliver a whole batch
 
-This failure has occurred, and nothing in this repository would have prevented
-it.
+**What goes wrong.** LetterStream mails in windowed envelopes. With
+`coversheet = "Y"` they generate their own addressed coversheet, so the window
+shows the address the API was given. With `"N"` the window shows part of your
+own PDF instead — and if an address on the page falls in the window area, USPS
+can read that address rather than the one you supplied through the API, and the
+piece is delivered there. One `submit` sends one PDF for every recipient in the
+job, so a single badly placed address can misdirect the whole batch to the same
+wrong place.
 
-On a real mailing, an entire batch of certified pieces was submitted with
-`coversheet` set to `"N"`, on the reasoning that the PDFs already carried the
-recipient's address laid out on the page. The whole batch was delivered to the
-wrong address — the same wrong address for every piece, in a different state
-from most of the intended recipients. LetterStream support confirmed the cause:
-an address on the PDF fell in the window area of their windowed envelopes, and
-USPS read what showed through the window rather than the address supplied
-through the API.
+**What happened on a real mailing.** This predates this project and was not
+sent with this tool — see *What has been tested against the live service* for
+everything that has been. An entire batch of certified pieces was submitted with
+`coversheet` set to `"N"`, on the reasoning that the PDFs already
+carried the recipient's address laid out on the page. The whole batch was
+delivered to the wrong address — the same wrong address for every piece, in a
+different state from most of the intended recipients. LetterStream support
+confirmed the cause: an address on the PDF fell in the window area of their
+windowed envelopes, and USPS read what showed through the window rather than the
+address supplied through the API. The job was submitted, held, reviewed and
+authorised correctly. The addresses carried through the API were right. The cost
+was right. The tracking numbers were right. The gate's promise is that nothing
+is mailed that a human did not approve. It says nothing about whether the
+approved thing is correct once it leaves, and nothing in this repository would
+have prevented this.
 
-The fix in that case was `coversheet = "Y"`, which has LetterStream generate
-their own addressed coversheet so the window shows the address the API was
-given. `"Y"` is this package's default. It addresses this specific failure mode;
-it is not a general guarantee that a piece arrives where you intended.
+**What to do.** Use `coversheet = "Y"` — leave it blank or set it to `"Y"`. That
+was the fix in that case, and `"Y"` is this package's default. It addresses this
+specific failure mode; it is not a general guarantee that a piece arrives where
+you intended.
 
-The job was submitted, held, reviewed and authorised correctly. The addresses
-carried through the API were right. The cost was right. The tracking numbers
-were right. The properties this repository argues for held — and the mail still
-went to the wrong state. The gate's promise is that nothing is mailed that a
-human did not approve. It says
-nothing about whether the approved thing is correct once it leaves. A proof PDF
-shows you the page; it does not show you which part of the page will be visible
-through an envelope.
-
-If you set `coversheet` to `"N"`, you are taking responsibility for the
-window area of every page yourself, and no check in this codebase is watching.
+Use `"N"` only if you have checked the PDF yourself and verified that nothing
+address-like falls in the window area of any page. Nothing in this codebase
+checks that, and the proof PDF will not show it to you: it shows you the page,
+not which part of the page will be visible through an envelope. Setting
+`coversheet` to `"N"` makes the window area of every page your responsibility.
 
 ### The other safety properties
 
@@ -392,7 +400,7 @@ window area of every page yourself, and no check in this codebase is watching.
   `authorize` optionally takes `acknowledge_cost_usd` and refuses if it
   disagrees with the quote, and reports the charged amount alongside the quote
   rather than echoing the quote back.
-- **Idempotency designed for the failure that actually happens.** The dangerous
+- **A retry after a timeout does not create a second job.** The dangerous
   case is not a duplicate click; it is the network dropping *after* LetterStream
   accepted the job. An idempotency key is written to disk before the request
   goes out and is left marked in-flight if the response never arrives. A retry
@@ -425,8 +433,8 @@ window area of every page yourself, and no check in this codebase is watching.
   told the proof was already authorised; the assertion is on the fake
   transport's `release_calls`, over sixty independent races per run. Within one
   process that holds unconditionally. Across processes it holds wherever `flock`
-  does — see *Where the gate stops*. The sequential half of this has also been
-  observed against the live service; the simultaneous half has not.
+  does — see *What the gate does not cover*. The sequential half of this has
+  also been observed against the live service; the simultaneous half has not.
 - **Proofs go stale.** Past a configurable TTL (default 24h), `authorize`
   refuses and you must submit and re-review.
 - **Credentials come from you.** There is no key in this repository, no default
@@ -494,8 +502,8 @@ against fixtures only.
 - It does not inspect the layout of your PDF, and in particular does not check
   whether an address falls in the window area of LetterStream's envelopes. That
   has caused a whole batch to be delivered to one wrong address on a real
-  mailing, with the gate raising no objection at any point — see *A failure the
-  gate cannot catch: the envelope window*.
+  mailing, with the gate raising no objection at any point — see
+  [Envelope windows](#envelope-windows-setting-coversheet-to-n-can-misdeliver-a-whole-batch).
 - The proof ledger on disk is a local trust root. Anything able to write to
   `state/` can forge a proof, and anything able to read it holds the authcodes.
   Put it somewhere only you can write.
@@ -585,7 +593,7 @@ description of the protocol.
 
 Written with Claude. The safety properties are not asserted on that basis — they
 are the ones `tools/mutation_test.py` breaks on purpose, each tied to a named
-test that fails when it does; that harness is what the claim rests on.
+test that fails when it does.
 
 ## Licence
 
