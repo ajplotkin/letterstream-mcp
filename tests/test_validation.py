@@ -16,7 +16,7 @@ def test_a_delimiter_in_an_address_field_is_rejected():
     is the failure mode that is hardest to notice after the fact.
     """
     address = Address(
-        name_1="Placeholder Bank: NA",
+        name_1="Example Recipient: Co",
         address_1="2 Nowhere Road",
         city="Faketown",
         state="AZ",

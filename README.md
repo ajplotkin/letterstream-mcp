@@ -152,7 +152,7 @@ letterstream-mcp submit \
   --pages 1 \
   --mail-type certified \
   --sender '{"name_1":"Testcorp Holdings","address_1":"1 Example Plaza","city":"Faketown","state":"AZ","zip_code":"99999"}' \
-  --recipient '{"doc_id":"DEMODOC0001","name_1":"Placeholder Bank NA","address_1":"2 Nowhere Road","city":"Faketown","state":"AZ","zip_code":"99999"}'
+  --recipient '{"doc_id":"DEMODOC0001","name_1":"Example Recipient Co","address_1":"2 Nowhere Road","city":"Faketown","state":"AZ","zip_code":"99999"}'
 ```
 
 ```jsonc
@@ -167,7 +167,7 @@ letterstream-mcp submit \
   "preview": {
     "sender": "Testcorp Holdings / 1 Example Plaza / Faketown, AZ 99999",
     "recipients": [
-      { "doc_id": "DEMODOC0001", "address": "Placeholder Bank NA / 2 Nowhere Road / Faketown, AZ 99999" }
+      { "doc_id": "DEMODOC0001", "address": "Example Recipient Co / 2 Nowhere Road / Faketown, AZ 99999" }
     ],
     "recipient_count": 1
   },
