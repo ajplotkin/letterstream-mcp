@@ -450,8 +450,9 @@ address. The test suite itself never touches the network.
 Confirmed live: authentication; that `submit` leaves a job held and unmailed
 (checked by eye in LetterStream's web UI); that the quoted price is the charged
 price; that `authorize` releases; that authorising twice mails and charges once;
-that `mail_type` works; that the read-only tools answer. One certified letter
-was delivered.
+that `mail_type` works; that the read-only tools answer. Both released letters
+— one certified, one first class — were delivered to the address they were
+addressed to.
 
 Four caveats:
 
