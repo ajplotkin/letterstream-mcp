@@ -64,12 +64,17 @@ def build_server(toolset: ToolSet):  # pragma: no cover - requires the mcp SDK
         ink: str | None = None,
         return_envelope: str | None = None,
         idempotency_key: str | None = None,
+        window_check: bool = False,
     ) -> dict[str, Any]:
         """Create a held job at LetterStream. Never mails anything.
 
         Returns a proof_id, the cost LetterStream quoted, and the SHA-256 of
         the uploaded document. Releasing the job requires a separate
         letterstream_authorize call carrying that proof_id and hash.
+
+        window_check (off by default) runs the local envelope-window heuristic
+        first. With coversheet="N" any problem refuses the submission; with "Y"
+        the report is informational. It never changes coversheet.
         """
         return toolset.letterstream_submit(
             job_name=job_name,
@@ -83,6 +88,7 @@ def build_server(toolset: ToolSet):  # pragma: no cover - requires the mcp SDK
             ink=ink,
             return_envelope=return_envelope,
             idempotency_key=idempotency_key,
+            window_check=window_check,
         )
 
     @server.tool()
@@ -127,6 +133,27 @@ def build_server(toolset: ToolSet):  # pragma: no cover - requires the mcp SDK
         released and delivered has not been verified.
         """
         return toolset.letterstream_tracking(proof_id=proof_id)
+
+    @server.tool()
+    def letterstream_preflight(document_path: str, out_path: str) -> dict[str, Any]:
+        """Run LetterStream's visual PreFlight on a PDF. Creates no job; mails nothing.
+
+        Uploads the PDF to LetterStream's PreFlight check and saves the PDF it
+        returns, marked up with their envelope windows, to out_path (which must
+        not already exist). Advisory only: it never changes coversheet. Refuses
+        in dry run, because it uploads the document.
+        """
+        return toolset.letterstream_preflight(document_path=document_path, out_path=out_path)
+
+    @server.tool()
+    def letterstream_check_windows(document_path: str) -> dict[str, Any]:
+        """Local, unofficial envelope-window heuristic. No network call.
+
+        Reports text and drawings on page 1 that fall in the TO/FROM windows or
+        the CERT barcode area, using rectangles measured from one PreFlight
+        result. Not a LetterStream specification; never changes coversheet.
+        """
+        return toolset.letterstream_check_windows(document_path=document_path)
 
     return server
 

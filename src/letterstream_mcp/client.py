@@ -25,7 +25,7 @@ from typing import Any
 from .config import Config
 from .errors import ApiError, TransportError
 from .models import SubmitRequest
-from .transport import RELEASE_FIELD, Transport
+from .transport import PREFLIGHT_FIELD, PREFLIGHT_VISUAL, RELEASE_FIELD, Transport
 
 #: Response codes LetterStream documents as successful outcomes.
 CODE_SUBMIT_SUCCESS = "-100"
@@ -378,4 +378,50 @@ class LetterStreamClient:
         raise TransportError(
             f"Proof request for doc_id {doc_id} did not return a PDF "
             f"({len(body)} bytes received)."
+        )
+
+    def preflight_visual(self, document_path: Path | str) -> bytes:
+        """Run LetterStream's visual PreFlight on a PDF; return the marked-up PDF.
+
+        LetterStream documents this as a template check (API docs, section
+        VIII "Document Template Pre-Flight"): the PDF comes back with their
+        envelope windows drawn over it. It creates no job and mails nothing;
+        a request made by hand on 2026-10-16 confirmed that, though this
+        method itself has not been run against the live service. Only
+        :meth:`Transport.preflight` is called.
+
+        That hand-made request returned raw PDF bytes. Base64 is accepted
+        too, as it is for print proofs. An XML body is read as an error
+        report.
+        """
+        document = Path(document_path)
+        fields = self._base_fields()
+        fields[PREFLIGHT_FIELD] = PREFLIGHT_VISUAL
+        body = self.transport.preflight(
+            fields, document_name=document.name, document_bytes=document.read_bytes()
+        )
+        if body[:4] == b"%PDF":
+            return body
+        try:
+            decoded = base64.b64decode(body, validate=True)
+        except Exception:  # noqa: BLE001
+            decoded = b""
+        if decoded[:4] == b"%PDF":
+            return decoded
+        context = f"PreFlight of {document.name}"
+        parsed = parse_response(body)
+        if "messages" in parsed:
+            errors = [
+                e
+                for e in parsed["messages"]
+                if isinstance(e, dict) and _is_error_type(e.get("type"))
+            ]
+            _raise_for_error_entries(errors, context=context)
+            raise ApiError(
+                f"{context}: LetterStream returned a message instead of a PDF: "
+                f"code {parsed.get('code', '?')}: {parsed.get('details', 'no detail supplied')}",
+                code=parsed.get("code"),
+            )
+        raise TransportError(
+            f"{context}: LetterStream did not return a PDF ({len(body)} bytes received)."
         )

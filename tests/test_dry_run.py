@@ -32,8 +32,9 @@ def test_dry_run_authorize_refuses_and_never_releases(dry_gate, transport, reque
     assert transport.total_calls == 0
 
 
-def test_dry_run_read_only_calls_also_refuse(dry_gate, transport):
+def test_dry_run_read_only_calls_also_refuse(dry_gate, transport, pdf_path, tmp_path):
     for call in (
+        lambda: dry_gate.preflight(pdf_path, tmp_path / "marked.pdf"),
         lambda: dry_gate.account_status(),
         lambda: dry_gate.tracking("prf_anything"),
         lambda: dry_gate.download_proof_pdfs("prf_anything", "/tmp/nope"),

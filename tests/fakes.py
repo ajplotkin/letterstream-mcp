@@ -14,6 +14,10 @@ from __future__ import annotations
 from typing import Any
 
 from letterstream_mcp.errors import TransportError
+from letterstream_mcp.transport import check_preflight_fields
+
+#: What a PreFlight result looks like to the client: raw PDF bytes.
+PREFLIGHT_PDF = b"%PDF-1.4\n% fake PreFlight result with envelope windows\n%%EOF\n"
 
 PREAUTH_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <messages id="fake-account">
@@ -95,10 +99,13 @@ class FakeTransport:
         submit_body: str | None = None,
         release_body: str | None = None,
         query_body: bytes | str | None = None,
+        preflight_body: bytes | None = None,
     ) -> None:
         self.submit_calls: list[dict[str, Any]] = []
         self.release_calls: list[dict[str, Any]] = []
         self.query_calls: list[dict[str, Any]] = []
+        self.preflight_calls: list[dict[str, Any]] = []
+        self.preflight_body = preflight_body if preflight_body is not None else PREFLIGHT_PDF
 
         self.submit_body = submit_body if submit_body is not None else preauth_body()
         self.release_body = (
@@ -117,7 +124,12 @@ class FakeTransport:
 
     @property
     def total_calls(self) -> int:
-        return len(self.submit_calls) + len(self.release_calls) + len(self.query_calls)
+        return (
+            len(self.submit_calls)
+            + len(self.release_calls)
+            + len(self.query_calls)
+            + len(self.preflight_calls)
+        )
 
     def submit_preauth(
         self, fields: dict[str, Any], *, document_name: str, document_bytes: bytes
@@ -146,6 +158,21 @@ class FakeTransport:
         self.query_calls.append(dict(fields))
         body = self.query_queue.pop(0) if self.query_queue else self.query_body
         return body.encode("utf-8") if isinstance(body, str) else body
+
+    def preflight(
+        self, fields: dict[str, Any], *, document_name: str, document_bytes: bytes
+    ) -> bytes:
+        # The same field check the real transport applies, so a request the
+        # real transport would refuse cannot pass here.
+        check_preflight_fields(fields)
+        self.preflight_calls.append(
+            {
+                "fields": dict(fields),
+                "document_name": document_name,
+                "document_bytes": document_bytes,
+            }
+        )
+        return self.preflight_body
 
 
 class FakeResponse:

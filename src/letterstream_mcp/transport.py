@@ -1,6 +1,6 @@
 """HTTP transport, split by consequence rather than by verb.
 
-The three methods below exist as three methods, and not as one generic
+The four methods below exist as four methods, and not as one generic
 ``post()``, so that "did this code path mail anything?" is answerable by
 looking at which method was called:
 
@@ -12,9 +12,14 @@ looking at which method was called:
   method in this package that causes mail to be produced and billed.
 * :meth:`Transport.query` performs read-only lookups (status, tracking, proof
   PDF download). It refuses to carry a ``doauth`` field.
+* :meth:`Transport.preflight` uploads a PDF to LetterStream's visual
+  PreFlight check, which returns the PDF marked up with their envelope windows.
+  It uploads under the ``preflight_file`` field, never ``single_file``, and
+  refuses ``doauth``, ``preauth`` and every field that describes a mailing
+  (``job``, ``to[]``, ``from`` ...), so it cannot be turned into a submission.
 
 Tests substitute a fake implementing this protocol and assert on which of the
-three was called. See ``tests/fakes.py``.
+four was called. See ``tests/fakes.py``.
 """
 
 from __future__ import annotations
@@ -28,6 +33,32 @@ RELEASE_FIELD = "doauth"
 #: Field name and value that hold a submission back from production.
 PREAUTH_FIELD = "preauth"
 PREAUTH_VALUE = "1"
+#: Field that selects LetterStream's PreFlight check, and its one documented value.
+PREFLIGHT_FIELD = "preflight"
+PREFLIGHT_VISUAL = "visual"
+#: Multipart field the PreFlight document is uploaded under. Submissions use
+#: ``single_file``; a PreFlight upload must never use that name.
+PREFLIGHT_FILE_FIELD = "preflight_file"
+#: Fields that describe a mailing. A PreFlight request carrying any of them is
+#: refused, so it cannot be mistaken by LetterStream (or by a reader) for a
+#: submission.
+SUBMISSION_FIELDS = frozenset(
+    {
+        RELEASE_FIELD,
+        PREAUTH_FIELD,
+        "job",
+        "to[]",
+        "to",
+        "from",
+        "pages",
+        "mailtype",
+        "coversheet",
+        "duplex",
+        "ink",
+        "paper",
+        "returnenv",
+    }
+)
 
 
 @runtime_checkable
@@ -49,12 +80,21 @@ class Transport(Protocol):
     def query(self, fields: dict[str, Any]) -> bytes:
         """Read-only lookup. Must not release anything."""
 
+    def preflight(
+        self,
+        fields: dict[str, Any],
+        *,
+        document_name: str,
+        document_bytes: bytes,
+    ) -> bytes:
+        """Upload a PDF for a visual PreFlight check. Creates no job."""
+
 
 class HttpTransport:
     """Real transport over ``requests``.
 
     Instantiating this object performs no I/O. Nothing is sent until one of the
-    three methods is called.
+    four methods is called.
     """
 
     def __init__(self, base_url: str, timeout_seconds: float = 60.0) -> None:
@@ -144,6 +184,55 @@ class HttpTransport:
                 f"Query request to {self.base_url} failed: {exc}"
             ) from exc
         return response.content
+
+    def preflight(
+        self,
+        fields: dict[str, Any],
+        *,
+        document_name: str,
+        document_bytes: bytes,
+    ) -> bytes:
+        check_preflight_fields(fields)
+        requests = self._session()
+        try:
+            response = requests.post(
+                self.base_url,
+                data=_as_pairs(fields),
+                files=[
+                    (
+                        PREFLIGHT_FILE_FIELD,
+                        (document_name, document_bytes, "application/pdf"),
+                    )
+                ],
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            raise TransportError(
+                f"PreFlight request to {self.base_url} failed: {exc}"
+            ) from exc
+        # Observed live: the body is raw PDF bytes even though the response is
+        # labelled text/html, so read .content, not .text.
+        return response.content
+
+
+def check_preflight_fields(fields: dict[str, Any]) -> None:
+    """Refuse a PreFlight request that is anything other than a PreFlight request.
+
+    Shared by the real transport and the test fake, so the fake cannot accept a
+    request the real transport would refuse.
+    """
+    if fields.get(PREFLIGHT_FIELD) != PREFLIGHT_VISUAL:
+        raise TransportError(
+            f"preflight() requires {PREFLIGHT_FIELD}={PREFLIGHT_VISUAL!r}; refusing "
+            "to upload a document without it."
+        )
+    carried = sorted(SUBMISSION_FIELDS & set(fields))
+    if carried:
+        raise TransportError(
+            f"preflight() was handed submission field(s) {carried}. A PreFlight "
+            "check creates no job and must not look like one."
+        )
 
 
 def _as_pairs(fields: dict[str, Any]) -> list[tuple[str, str]]:

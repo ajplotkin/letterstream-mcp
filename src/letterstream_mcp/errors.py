@@ -55,6 +55,13 @@ class DryRunRefusal(GateRefusal):
     """Live mode is off. Raised by any operation that would contact LetterStream."""
 
 
+class WindowCheckFailed(GateRefusal):
+    """An opt-in envelope-window check found problems with ``coversheet = "N"``.
+
+    Raised only when the caller asked for the check. Nothing was submitted.
+    """
+
+
 class UnknownProof(GateRefusal):
     """No proof with that identifier exists in the local ledger."""
 

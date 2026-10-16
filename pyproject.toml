@@ -19,7 +19,8 @@ dependencies = ["requests>=2.28"]
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0"]
-dev = ["pytest>=7.0"]
+geometry = ["pdfplumber>=0.10"]
+dev = ["pytest>=7.0", "pdfplumber>=0.10"]
 
 [project.scripts]
 letterstream-mcp = "letterstream_mcp.cli:main"

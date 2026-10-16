@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Config, load_config
-from .errors import LetterStreamError, ValidationError
+from .errors import LetterStreamError, ValidationError, WindowCheckFailed
 from .gate import MailGate
 from .models import Address, Recipient, SubmitRequest
 from .store import CROSS_PROCESS_LOCKING, Store
+from .windows import check_windows
 
 #: Names of the tools this package exposes, in the order documented in README.
 TOOL_NAMES = (
@@ -31,6 +32,8 @@ TOOL_NAMES = (
     "letterstream_download_proof_pdfs",
     "letterstream_authorize",
     "letterstream_tracking",
+    "letterstream_preflight",
+    "letterstream_check_windows",
 )
 
 
@@ -124,12 +127,21 @@ class ToolSet:
         ink: str | None = None,
         return_envelope: str | None = None,
         idempotency_key: str | None = None,
+        window_check: bool = False,
     ) -> dict[str, Any]:
         """Create a held job at LetterStream. Never mails anything.
 
         Returns a proof id, the quoted cost, and the SHA-256 of the uploaded
         document. Releasing the job requires a separate
         ``letterstream_authorize`` call carrying that proof id and hash.
+
+        ``window_check`` is off by default and nothing runs unless it is set.
+        When set, the local envelope-window heuristic runs on the document
+        before anything is sent, and its report is returned as
+        ``window_check``. With ``coversheet="N"`` any problem it reports
+        refuses the submission; with ``"Y"`` the report is informational,
+        because LetterStream's coversheet is what shows through the windows.
+        It never changes ``coversheet``.
         """
         request = self._build_request(
             job_name=job_name,
@@ -144,7 +156,20 @@ class ToolSet:
             return_envelope=return_envelope,
             idempotency_key=idempotency_key,
         )
-        return self.gate.submit(request)
+        if not window_check:
+            return self.gate.submit(request)
+        report = check_windows(request.document_path)
+        if request.coversheet.strip().upper() == "N" and report["problems"]:
+            raise WindowCheckFailed(
+                f"window_check found {len(report['problems'])} problem(s) with "
+                "coversheet='N', so nothing was submitted: "
+                + " ".join(report["problems"])
+                + " Use coversheet='Y' (the default), or fix the layout and check it "
+                "again; letterstream_preflight is the authoritative check."
+            )
+        result = self.gate.submit(request)
+        result["window_check"] = report
+        return result
 
     @guard
     def letterstream_list_proofs(self) -> dict[str, Any]:
@@ -192,6 +217,27 @@ class ToolSet:
         released and delivered has not been verified.
         """
         return {"tracking": self.gate.tracking(proof_id)}
+
+    @guard
+    def letterstream_preflight(self, *, document_path: str, out_path: str) -> dict[str, Any]:
+        """Run LetterStream's visual PreFlight on a PDF. Creates no job; mails nothing.
+
+        Uploads the PDF to LetterStream's PreFlight check and saves the PDF it
+        returns, marked up with their envelope windows, to ``out_path`` (which
+        must not already exist). Advisory only: it never changes coversheet.
+        Refuses in dry run, because it uploads the document.
+        """
+        return self.gate.preflight(document_path, out_path)
+
+    @guard
+    def letterstream_check_windows(self, *, document_path: str) -> dict[str, Any]:
+        """Local, unofficial envelope-window heuristic. No network call.
+
+        Reports text and drawings on page 1 that fall in the TO/FROM windows or
+        the CERT barcode area, using rectangles measured from one PreFlight
+        result. Not a LetterStream specification; never changes coversheet.
+        """
+        return {"windows": check_windows(document_path)}
 
     # ---- helpers ------------------------------------------------------
 

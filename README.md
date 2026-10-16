@@ -25,7 +25,9 @@ pip install -e '.[mcp,dev]'
 ```
 
 Python 3.11 or newer. The only runtime dependency is `requests`; `mcp` is needed
-only to run the MCP server, and `pytest` only to run the tests.
+only to run the MCP server, and `pytest` only to run the tests. The optional
+local envelope-window check needs `pdfplumber` (`pip install -e '.[geometry]'`;
+`dev` includes it).
 
 ## Configuration
 
@@ -220,18 +222,20 @@ Exit codes: `0` success, `1` the gate refused, `2` configuration problem,
 
 ## MCP tool surface
 
-Eight tools. `letterstream_authorize` is the only one that mails.
+Ten tools. `letterstream_authorize` is the only one that mails.
 
 | Tool | Parameters | Returns |
 |---|---|---|
 | `letterstream_check_config` | none | `{ok, configured, live, mode, config, state_dir, cross_process_locking, tools}` — `config` reports `api_key_present` and `api_key_length`, never the key; `cross_process_locking` says whether the release lock extends past this process |
 | `letterstream_account_status` | none | `{ok, account_status}` — LetterStream's parsed account-status response. Observed live to carry an auth confirmation only, with no balance or funding data. Read-only. Refuses in dry run |
-| `letterstream_submit` | `job_name`, `document_path`, `pages`, `sender`, `recipients`, and optional `mail_type`, `coversheet`, `duplex`, `ink`, `return_envelope`, `idempotency_key` | `{ok, dry_run, live, mailed: false, proof_id, proof, document_sha256, cost_usd, cost_note, preview, note}`. **Never mails.** In dry run `proof_id` is `null` and no proof is written |
+| `letterstream_submit` | `job_name`, `document_path`, `pages`, `sender`, `recipients`, and optional `mail_type`, `coversheet`, `duplex`, `ink`, `return_envelope`, `idempotency_key`, `window_check` | `{ok, dry_run, live, mailed: false, proof_id, proof, document_sha256, cost_usd, cost_note, preview, note}`, plus `window_check` when that was asked for. **Never mails.** In dry run `proof_id` is `null` and no proof is written |
 | `letterstream_list_proofs` | none | `{ok, proofs: [...]}` — ledger records, authcode stripped. Local only |
 | `letterstream_get_proof` | `proof_id` | `{ok, proof}` — one record including `document_sha256`, authcode stripped. Local only |
 | `letterstream_download_proof_pdfs` | `proof_id`, `out_dir` | `{ok, files: [paths]}` — LetterStream's print proofs. Read-only. Refuses in dry run |
 | `letterstream_authorize` | `proof_id`, `document_sha256`, optional `acknowledge_cost_usd` | `{ok, mailed, already_authorized, proof_id, job_name, recipient_count, quoted_cost_usd, charged_cost_usd, cost_matches_quote, response_code, response, note}`. **This mails.** Refuses in dry run |
 | `letterstream_tracking` | `proof_id` | `{ok, tracking: [{doc_id, tracking}]}` — read-only. Refuses in dry run |
+| `letterstream_preflight` | `document_path`, `out_path` | `{ok, mailed: false, document, document_sha256, out_path, bytes, note}` — uploads the PDF to LetterStream's visual PreFlight and saves the marked-up PDF it returns. Creates no job. `out_path` must not exist. Refuses in dry run. See [PreFlight and the window check](#preflight-and-the-window-check-optional) |
+| `letterstream_check_windows` | `document_path` | `{ok, windows: {heuristic, disclaimer, zones, problems, problem_count, coversheet_changed: false, ...}}` — local, unofficial heuristic; no network call, works in dry run |
 
 `sender` is an object with `name_1`, `address_1`, `city`, `state`, `zip_code`
 required and `name_2`, `address_2` optional. Each entry in `recipients` is the
@@ -280,12 +284,13 @@ authorize ──▶ takes the proof id and the hash the caller approved,
 Five things keep the two calls apart:
 
 **1. `submit` calls a different transport method than `authorize` does.**
-The transport exposes `submit_preauth`, `release`, and `query` as three named
-methods rather than one generic `post()`. `release` is the only one that sends
-LetterStream the field that puts a job into production. `MailGate.submit` calls
-`submit_preauth` and — on a retry — `query`. It never calls `release`. A test
-asserts on the fake transport's `release_calls` list, and a second test reads
-`MailGate.submit`'s own source and asserts it contains no `.release(` call.
+The transport exposes `submit_preauth`, `release`, `query` and `preflight` as
+four named methods rather than one generic `post()`. `release` is the only one
+that sends LetterStream the field that puts a job into production.
+`MailGate.submit` calls `submit_preauth` and — on a retry — `query`. It never
+calls `release`. A test asserts on the fake transport's `release_calls` list,
+and a second test reads `MailGate.submit`'s own source and asserts it contains
+no `.release(` call.
 
 **2. A submission is always a held job.** `HttpTransport.submit_preauth` sets
 the pre-authorisation flag *after* merging the caller's fields, so a caller
@@ -381,10 +386,79 @@ specific failure mode; it is not a general guarantee that a piece arrives where
 you intended.
 
 Use `"N"` only if you have checked the PDF yourself and verified that nothing
-address-like falls in the window area of any page. Nothing in this codebase
-checks that, and the proof PDF will not show it to you: it shows you the page,
-not which part of the page will be visible through an envelope. Setting
+address-like falls in the window area of any page. The print proof will not
+show you that: it shows the page, not which part of it shows through an
+envelope. The optional checks in the next section can help, but they run only
+when you ask for them, and a clean result from them is not a guarantee. Setting
 `coversheet` to `"N"` makes the window area of every page your responsibility.
+
+### PreFlight and the window check (optional)
+
+Nothing in this section runs unless you ask for it, and nothing in it changes
+`coversheet`. These checks are for testing a layout, not a reason to drop the
+coversheet: if your letters cannot reasonably be reformatted to fit the
+windows, keep `coversheet = "Y"` and pay for the extra page. That is the
+default and still the recommendation.
+
+**LetterStream PreFlight — `letterstream_preflight` / `letterstream-mcp preflight <pdf> --out <marked.pdf>`.**
+LetterStream's API documentation (section VIII, "Document Template Pre-Flight")
+describes a check that takes a PDF and returns it with their envelope windows
+drawn over it. This package sends it as a multipart POST with the usual
+`a`/`h`/`t` auth fields, `preflight=visual`, and the file under `preflight_file`.
+That is a different field from the `single_file` a submission uses, and the
+transport refuses any field that describes a mailing (`job`, `to[]`, `from`,
+`preauth`, `doauth` and the rest). A request made by hand on 2026-10-16 created
+no job, mailed nothing, and cost nothing; the response was raw PDF bytes,
+although it was labelled `text/html`. This package's own `preflight` code path
+has not been run against the live service. Only its tests have run it, against a
+fake transport. It refuses in dry run like every other call that contacts
+LetterStream, because it uploads the whole document. LetterStream's documentation
+lists an "auto" PreFlight as coming soon; only `visual` is supported here.
+
+**Local window check — `letterstream_check_windows` / `letterstream-mcp check-windows <pdf>`.**
+An unofficial heuristic that needs no credentials and no network. It reads page
+1 with `pdfplumber` and reports the text lines, drawings and images that fall
+in the windows or the CERT barcode area, plus text outside the minimum margins.
+It refuses pages that are not letter size, since that is the only size measured.
+
+**Opt-in check on submit — `window_check=true` / `--window-check`.** This runs
+the local check before anything is sent. With `coversheet="N"`, any problem
+refuses the submission (`WindowCheckFailed`, nothing submitted). With `"Y"` the
+submission goes ahead and the report is returned under `window_check`, because
+the coversheet, not your page, is what shows through the windows. It is off by
+default.
+
+**The measured geometry.** These figures were read from the vector drawings in
+the PDF that PreFlight returned on 2026-10-16 for a letter-size calibration
+grid. A redraw of that grid is `tests/fixtures/calibration_grid.pdf`;
+LetterStream's result is not committed. The result labelled itself
+"LetterStream Preflight v4 revised 06/18/2024". Inches from the top-left of the
+page, rounded to 0.01:
+
+| Area | Opening (red box) x | Opening y | Safe zone (green box) x | Safe zone y |
+|---|---|---|---|---|
+| FROM (return address) | 0.72 – 3.72 | 0.17 – 1.19 | 0.875 – 3.57 | 0.17 – 1.04 |
+| TO (recipient) | 0.72 – 4.15 | 1.89 – 3.07 | 0.875 – 4.00 | 2.04 – 2.92 |
+| CERT barcode area (must be blank) | — | — | 4.75 – 8.31 | 0.69 – 2.19 |
+
+**Caveat: this is not a LetterStream specification.** LetterStream labels the
+red boxes TO and FROM and the green one CERT. Treating the thinner green box
+inside each red window as the safe zone for text is this project's reading of
+the drawing. LetterStream has not confirmed it. The minimum-margin box is drawn
+0.25 in from the sides and about 0.17 in from the top and 0.19 in from the
+bottom, although its label says `.20" top/bottom`; the check uses the drawn box.
+The same result also marks perforation lines at about 7.32 in and 8.25 in, and
+return-envelope windows between about 9.36 in and 10.38 in. Those apply only
+with perforated paper or a return envelope, and the check ignores them. If
+LetterStream changes its envelopes, these numbers go stale silently. Run
+PreFlight again rather than trusting them.
+
+**What PreFlight found on a real template.** One letter template that has been
+mailed with a coversheet was run through PreFlight on 2026-10-16. Without the
+coversheet it would not pass: the date and the "VIA CERTIFIED MAIL" line land
+in the TO window, the recipient's street line straddles its bottom edge and the
+city line falls wholly below it, and the centred letterhead runs into the CERT
+area. That template stays on `coversheet = "Y"`.
 
 ### The other safety properties
 
@@ -485,10 +559,12 @@ against fixtures only.
   says so too.
 - It does not batch-upload ZIP archives (LetterStream's other submission
   method). One PDF, one job, one or more recipients.
-- It does not do USPS notification subscriptions, address validation, or
-  pre-flight envelope checking. For certified mail it does surface the tracking
-  number a subscription would need, at submit time — see the `per_doc` note
-  under *MCP tool surface* — but subscribing is left to you.
+- It does not do USPS notification subscriptions or address validation.
+  Envelope checking is opt-in only — see
+  [PreFlight and the window check](#preflight-and-the-window-check-optional).
+  For certified mail it does surface the tracking number a subscription would
+  need, at submit time — see the `per_doc` note under *MCP tool surface* — but
+  subscribing is left to you.
 - It does not cancel or recall a released job; nothing here can.
 - It does not manage LetterStream account funding or test mode. Those are web
   UI settings on your account, and they are an additional layer of protection
@@ -500,11 +576,12 @@ against fixtures only.
   been checked once rather than assumed. What the code still cannot do is see
   that for itself: it reads LetterStream's response, not their production queue,
   so it could not detect a job that was mailed despite the flag.
-- It does not inspect the layout of your PDF, and in particular does not check
-  whether an address falls in the window area of LetterStream's envelopes. That
-  has caused a whole batch to be delivered to one wrong address on a real
-  mailing, with the gate raising no objection at any point — see
+- It does not inspect the layout of your PDF unless you ask it to. By default
+  nothing checks whether an address falls in the window area of LetterStream's
+  envelopes. That has caused a whole batch to be delivered to one wrong address
+  on a real mailing, with the gate raising no objection at any point — see
   [Envelope windows](#envelope-windows-setting-coversheet-to-n-can-misdeliver-a-whole-batch).
+  The opt-in checks are a heuristic and an advisory upload, not a guarantee.
 - The proof ledger on disk is a local trust root. Anything able to write to
   `state/` can forge a proof, and anything able to read it holds the authcodes.
   Put it somewhere only you can write.
@@ -515,7 +592,7 @@ against fixtures only.
 pytest -v
 ```
 
-139 tests, no network. An autouse fixture patches the socket entry points
+197 tests, no network. An autouse fixture patches the socket entry points
 `requests` reaches for — `socket.create_connection`, `socket.socket.connect` and
 `socket.socket.connect_ex` — and raises if a test tries to connect; one test
 deliberately trips it, so the block is verified rather than assumed. Every
@@ -538,6 +615,8 @@ The safety tests:
 | `test_cost.py` | the quote is available before anything is released, and a charge differing from the quote is reported rather than hidden |
 | `test_credentials.py` | missing credentials give a message and exit 2, with no traceback and no transport call; there is no `--live` flag anywhere in the parser |
 | `test_concurrency.py` | six threads authorising one proof release it exactly once, and the other five are told it was already authorised; identical simultaneous submits create one held job; a crash between claiming a release and recording it refuses every caller queued behind it; a caller that cannot get the lock refuses rather than mailing; six independently built gates over one state directory (half of them via a symlink) release it once; four separate processes releasing one proof release it once |
+| `test_preflight.py` | PreFlight reaches only `transport.preflight`, never submit or release, and writes no ledger entry; the upload goes under `preflight_file`, never `single_file`; every submission field is refused before a request is built; dry run refuses; an existing file, including the input, is never overwritten |
+| `test_windows.py` | the local heuristic flags a date in the TO window, a line below it, and text or drawings in the CERT area, and passes a page laid out inside the safe zones; `window_check` never runs unless asked for; with `coversheet="N"` it refuses a bad layout before any transport call, and with `"Y"` it reports and still submits; `coversheet` is never changed |
 | `test_repo_hygiene.py` | no absolute home paths, no credential-shaped literals, blank example config, correct `.gitignore`, and neither `config.toml` nor `state/` committed |
 
 ### Mutation testing
@@ -553,12 +632,15 @@ python tools/mutation_test.py --list   # list them
 python tools/mutation_test.py -k dry_run
 ```
 
-34 mutations, all currently caught. `--list` names them; they cover the gate
+43 mutations, all currently caught. `--list` names them; they cover the gate
 (make `submit` call `release`, make `authorize` skip the re-hash or trust the
 caller's hash), dry run, idempotency and retry, every lock, credential and
-authcode handling, cost, and the read-only error handling. The script exits
-non-zero if any mutation survives, and refuses to run if the unmutated copy does
-not pass first.
+authcode handling, cost, the read-only error handling, and the PreFlight and
+window-check guards (PreFlight mailing, uploading as a submission, ignoring dry
+run or overwriting files; the window check running unasked, not refusing
+`coversheet="N"`, or ignoring text in the CERT area or outside a safe zone).
+The script exits non-zero if any mutation survives, and refuses to run if the
+unmutated copy does not pass first.
 
 ## LetterStream's terms
 

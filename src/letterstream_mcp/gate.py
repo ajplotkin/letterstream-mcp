@@ -67,6 +67,7 @@ from .errors import (
     ProofMismatch,
     TransportError,
     UnknownProof,
+    ValidationError,
 )
 from .models import Proof, SubmitRequest, sha256_file
 from .store import STATE_IN_FLIGHT, Store
@@ -561,6 +562,48 @@ class MailGate:
                 f"Live mode is off, so {what} cannot contact LetterStream. "
                 "Set [safety] live = true in config.toml, or LETTERSTREAM_LIVE=true."
             )
+
+    def preflight(self, document_path: Path | str, out_path: Path | str) -> dict[str, Any]:
+        """Run LetterStream's visual PreFlight and save the marked-up PDF. Read-only.
+
+        Uses ``transport.preflight`` only: it never submits, never releases, and
+        writes nothing to the ledger. It refuses in dry run like every other
+        call that contacts LetterStream, because dry run means "no request is
+        made to LetterStream" and a PreFlight uploads the whole document.
+
+        The result is advisory. It does not change ``coversheet`` or anything
+        else about a later submission.
+        """
+        self._require_live("PreFlight")
+        document = Path(document_path).expanduser()
+        target = Path(out_path).expanduser()
+        if not document.is_file():
+            raise ValidationError(f"No PDF at {document}.")
+        with document.open("rb") as handle:
+            if handle.read(4) != b"%PDF":
+                raise ValidationError(f"{document} is not a PDF.")
+        if target.exists():
+            # Covers out_path == document_path too: the source is never overwritten.
+            raise ValidationError(
+                f"{target} already exists; choose a new path for the PreFlight result."
+            )
+        document_sha256 = sha256_file(document)
+        marked = self.client.preflight_visual(document)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(marked)
+        return {
+            "mailed": False,
+            "document": str(document),
+            "document_sha256": document_sha256,
+            "out_path": str(target),
+            "bytes": len(marked),
+            "note": (
+                "LetterStream's PreFlight result, with their envelope windows drawn "
+                "over your document. Advisory only: it creates no job, and this "
+                "tool never changes coversheet. coversheet='Y' remains the default "
+                "and the recommendation."
+            ),
+        }
 
     def account_status(self) -> dict[str, Any]:
         self._require_live("account status")

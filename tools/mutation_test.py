@@ -481,6 +481,103 @@ MUTATIONS: list[Mutation] = [
             "tests/test_validation.py::test_a_pipe_in_an_address_field_is_rejected",
         ],
     ),
+    Mutation(
+        identifier="preflight-mails",
+        property_broken="PreFlight never mails",
+        relative_path="src/letterstream_mcp/gate.py",
+        find="        marked = self.client.preflight_visual(document)\n",
+        replace=(
+            "        marked = self.client.preflight_visual(document)\n"
+            "        self.client.release('x')  # MUTATION: mail on PreFlight\n"
+        ),
+        expect_failures=[
+            "tests/test_preflight.py::test_preflight_uses_only_the_preflight_transport_method",
+            "tests/test_preflight.py::test_gate_preflight_source_never_references_submit_or_release",
+        ],
+    ),
+    Mutation(
+        identifier="preflight-uploads-as-submission",
+        property_broken="a PreFlight upload never uses the submission file field",
+        relative_path="src/letterstream_mcp/transport.py",
+        find='PREFLIGHT_FILE_FIELD = "preflight_file"',
+        replace='PREFLIGHT_FILE_FIELD = "single_file"  # MUTATION',
+        expect_failures=[
+            "tests/test_preflight.py::test_http_preflight_uploads_under_preflight_file_not_single_file",
+        ],
+    ),
+    Mutation(
+        identifier="preflight-accepts-submission-fields",
+        property_broken="a PreFlight request cannot carry mailing fields",
+        relative_path="src/letterstream_mcp/transport.py",
+        find="    carried = sorted(SUBMISSION_FIELDS & set(fields))\n    if carried:",
+        replace="    carried = sorted(SUBMISSION_FIELDS & set(fields))\n    if False:  # MUTATION",
+        expect_failures=[
+            "tests/test_preflight.py::test_http_preflight_refuses_every_submission_field",
+            "tests/test_preflight.py::test_http_preflight_refuses_the_release_field_specifically",
+        ],
+    ),
+    Mutation(
+        identifier="dry-run-allows-preflight",
+        property_broken="dry run never uploads a document",
+        relative_path="src/letterstream_mcp/gate.py",
+        find='        self._require_live("PreFlight")\n',
+        replace="        pass  # MUTATION: PreFlight ignores dry run\n",
+        expect_failures=[
+            "tests/test_preflight.py::test_dry_run_preflight_refuses_before_the_transport",
+            "tests/test_dry_run.py::test_dry_run_read_only_calls_also_refuse",
+        ],
+    ),
+    Mutation(
+        identifier="preflight-overwrites-files",
+        property_broken="PreFlight never overwrites a file, including its own input",
+        relative_path="src/letterstream_mcp/gate.py",
+        find="        if target.exists():\n",
+        replace="        if False:  # MUTATION\n",
+        expect_failures=[
+            "tests/test_preflight.py::test_preflight_never_overwrites_an_existing_file",
+            "tests/test_preflight.py::test_preflight_cannot_overwrite_the_document_it_checks",
+        ],
+    ),
+    Mutation(
+        identifier="window-check-ignores-cert-text",
+        property_broken="text in the CERT barcode area is reported",
+        relative_path="src/letterstream_mcp/windows.py",
+        find="    for ln in cert_lines:\n",
+        replace="    for ln in []:  # MUTATION\n",
+        expect_failures=["tests/test_windows.py::test_text_in_the_cert_area_is_flagged"],
+    ),
+    Mutation(
+        identifier="window-check-ignores-clipped-lines",
+        property_broken="text in a window but outside its safe zone is reported",
+        relative_path="src/letterstream_mcp/windows.py",
+        find="        clipped = [ln for ln in visible if not safe.contains(",
+        replace="        clipped = [ln for ln in [] if not safe.contains(  # MUTATION\n           ",
+        expect_failures=[
+            "tests/test_windows.py::test_a_date_at_the_top_of_the_to_window_is_flagged",
+            "tests/test_windows.py::test_an_address_line_falling_below_the_to_window_is_flagged",
+        ],
+    ),
+    Mutation(
+        identifier="window-check-runs-by-default",
+        property_broken="the window check runs only when asked for",
+        relative_path="src/letterstream_mcp/toolset.py",
+        find="        if not window_check:\n            return self.gate.submit(request)\n",
+        replace="        if False:  # MUTATION: always check\n            return self.gate.submit(request)\n",
+        expect_failures=[
+            "tests/test_windows.py::test_window_check_is_off_by_default_and_never_runs",
+        ],
+    ),
+    Mutation(
+        identifier="window-check-does-not-block-coversheet-n",
+        property_broken="an opted-in window check refuses a bad layout with coversheet N",
+        relative_path="src/letterstream_mcp/toolset.py",
+        find='        if request.coversheet.strip().upper() == "N" and report["problems"]:',
+        replace="        if False:  # MUTATION: report but never refuse",
+        expect_failures=[
+            "tests/test_windows.py::test_window_check_with_coversheet_n_refuses_a_bad_layout_before_the_transport",
+            "tests/test_windows.py::test_window_check_refuses_in_dry_run_too",
+        ],
+    ),
 ]
 
 FAILURE_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)", re.MULTILINE)

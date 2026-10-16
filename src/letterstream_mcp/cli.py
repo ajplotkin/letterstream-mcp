@@ -20,6 +20,7 @@ from typing import Any
 from .config import load_config
 from .errors import GateRefusal, LetterStreamError
 from .toolset import ToolSet
+from .windows import check_windows
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -81,6 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--ink")
     submit.add_argument("--return-envelope")
     submit.add_argument("--idempotency-key")
+    submit.add_argument(
+        "--window-check",
+        action="store_true",
+        help=(
+            "Opt in to the local envelope-window heuristic before submitting. "
+            "With --coversheet N any problem refuses the submission. Off by default."
+        ),
+    )
 
     sub.add_parser("list-proofs", help="List held and authorised jobs from the ledger.")
 
@@ -109,6 +118,27 @@ def build_parser() -> argparse.ArgumentParser:
     tracking = sub.add_parser("tracking", help="Fetch LetterStream's tracking/status record for a submitted job.")
     tracking.add_argument("proof_id")
 
+    preflight = sub.add_parser(
+        "preflight",
+        help=(
+            "Upload a PDF to LetterStream's visual PreFlight and save the marked-up "
+            "result. Creates no job and mails nothing. Refuses in dry run."
+        ),
+    )
+    preflight.add_argument("document", help="Path to the PDF to check.")
+    preflight.add_argument(
+        "--out", required=True, help="Where to save the marked-up PDF. Must not exist."
+    )
+
+    windows = sub.add_parser(
+        "check-windows",
+        help=(
+            "Local, unofficial heuristic: what on page 1 falls in the envelope "
+            "windows. No network call and no credentials needed."
+        ),
+    )
+    windows.add_argument("document", help="Path to the PDF to check.")
+
     return parser
 
 
@@ -131,6 +161,7 @@ def _dispatch(toolset: ToolSet, args: argparse.Namespace) -> dict[str, Any]:
             ink=args.ink,
             return_envelope=args.return_envelope,
             idempotency_key=args.idempotency_key,
+            window_check=args.window_check,
         )
     if command == "list-proofs":
         return toolset.letterstream_list_proofs()
@@ -148,12 +179,20 @@ def _dispatch(toolset: ToolSet, args: argparse.Namespace) -> dict[str, Any]:
         )
     if command == "tracking":
         return toolset.letterstream_tracking(proof_id=args.proof_id)
+    if command == "preflight":
+        return toolset.letterstream_preflight(document_path=args.document, out_path=args.out)
     raise SystemExit(f"Unknown command: {command}")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "check-windows":
+        # Purely local, so it does not need (or read) credentials.
+        result = _check_windows(args.document)
+        print(json.dumps(result, indent=2, default=str))
+        return EXIT_OK if result.get("ok") else EXIT_ERROR
 
     try:
         config = load_config(
@@ -176,6 +215,13 @@ def main(argv: list[str] | None = None) -> int:
     if result.get("ok") is False:
         return EXIT_REFUSED if _is_refusal(result) else EXIT_ERROR
     return EXIT_OK
+
+
+def _check_windows(document: str) -> dict[str, Any]:
+    try:
+        return {"ok": True, "windows": check_windows(document)}
+    except LetterStreamError as exc:
+        return {"ok": False, "error_type": type(exc).__name__, "error": str(exc)}
 
 
 def _is_refusal(result: dict[str, Any]) -> bool:
