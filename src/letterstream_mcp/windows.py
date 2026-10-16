@@ -8,13 +8,15 @@ call and works in dry run.
 
 Where the rectangles come from, stated exactly: they were read on 2026-10-16
 from the vector drawings in the PDF that LetterStream's visual PreFlight
-returned for a letter-size calibration grid. A redraw of that grid is
-``tests/fixtures/calibration_grid.pdf``; LetterStream's result is not
-committed, and it identified itself as "LetterStream Preflight v4 revised
-06/18/2024". LetterStream labels the red boxes TO and FROM and the green box
-CERT. Reading the thinner green box *inside* each red window as the safe zone
-for text is this project's interpretation and has not been confirmed by
-LetterStream. PreFlight itself (:meth:`letterstream_mcp.gate.MailGate.preflight`)
+returned for a letter-size calibration grid. That result is committed as
+``tests/fixtures/preflight_calibration_result.pdf`` (it identifies itself as
+"LetterStream Preflight v4 revised 06/18/2024"), and ``tests/test_windows.py``
+matches every zone below to exactly one of its drawn boxes, and every box to a
+zone. A redraw of the grid that was sent is
+``tests/fixtures/calibration_grid.pdf``. LetterStream labels the red boxes TO
+and FROM and the green box CERT. Reading the thinner green box *inside* each
+red window as the safe zone for text is this project's interpretation and has
+not been confirmed by LetterStream. PreFlight itself (:meth:`letterstream_mcp.gate.MailGate.preflight`)
 is the authoritative check.
 
 Nothing here changes ``coversheet``. A clean report is not permission to set it

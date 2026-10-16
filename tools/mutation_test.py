@@ -558,6 +558,28 @@ MUTATIONS: list[Mutation] = [
         ],
     ),
     Mutation(
+        identifier="window-geometry-mistyped",
+        property_broken="the window rectangles match LetterStream's drawing",
+        relative_path="src/letterstream_mcp/windows.py",
+        find='TO_OPENING = Zone("TO window", 0.72, 1.89, 4.15, 3.07)',
+        replace='TO_OPENING = Zone("TO window", 0.72, 1.89, 4.15, 3.17)  # MUTATION',
+        expect_failures=[
+            "tests/test_windows.py::test_every_zone_matches_letterstreams_drawing",
+        ],
+    ),
+    Mutation(
+        identifier="window-geometry-duplicated",
+        property_broken="each window rectangle is its own box in LetterStream's drawing",
+        relative_path="src/letterstream_mcp/windows.py",
+        find='FROM_SAFE = Zone("FROM safe zone", 0.875, 0.17, 3.57, 1.04)',
+        # The TO safe zone's figures: every zone still matches some box, and the
+        # box count is unchanged, so only a one-to-one match notices.
+        replace='FROM_SAFE = Zone("FROM safe zone", 0.875, 2.04, 4.00, 2.92)  # MUTATION',
+        expect_failures=[
+            "tests/test_windows.py::test_every_zone_matches_letterstreams_drawing",
+        ],
+    ),
+    Mutation(
         identifier="window-check-runs-by-default",
         property_broken="the window check runs only when asked for",
         relative_path="src/letterstream_mcp/toolset.py",

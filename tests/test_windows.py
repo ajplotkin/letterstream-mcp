@@ -330,3 +330,139 @@ def test_cli_window_check_refusal_exits_as_a_refusal(tmp_path, monkeypatch, caps
     )
     assert code == cli.EXIT_REFUSED
     assert '"error_type": "WindowCheckFailed"' in capsys.readouterr().out
+
+
+# ---- the rectangles against LetterStream's own drawing ---------------------------
+
+PREFLIGHT_RESULT = FIXTURES / "preflight_calibration_result.pdf"
+RED = (1.0, 0.0, 0.0)
+GREEN = (0.0, 1.0, 0.0)
+GREY = (0.8, 0.8, 0.8)
+#: The zones are the drawn edges rounded to 0.01 in, so each true edge is within
+#: half of that. A figure further off is a typo, including one that is 0.01 out.
+DRAWING_TOLERANCE_IN = 0.005
+#: How the result labels itself, printed sideways down the left edge.
+LETTERSTREAM_LABEL = "LetterStream Preflight v4 revised 06/18/2024"
+#: Every upright word on the page: the grid's own rulers and caption, plus the
+#: labels of LetterStream's overlay. Nothing else may appear.
+GRID_WORDS = {f'{k}"' for k in range(11)} | set(
+    "LetterStream PreFlight calibration grid - inches from top-left".split()
+)
+OVERLAY_WORDS = set('Minimum Margins (.25" left/right .20" top/bottom)'.split()) | {
+    "TO", "FROM", "CERT", "PERF", "PERF2", "6", "3/4", "#9LWS", "#9RWS",
+    "Typical", "OCR", "Scan", "Line",
+}
+
+
+def _colour(shape: dict) -> tuple[float, ...]:
+    """A shape's stroke colour as a tuple of rounded floats.
+
+    pdfplumber has returned colours as lists or tuples depending on version, and
+    the components come out of the content stream as parsed floats; rounding to
+    three places compares the colour, not the representation.
+    """
+    raw = shape.get("stroking_color")
+    if raw is None:
+        return ()
+    if isinstance(raw, (int, float)):
+        raw = (raw,)
+    return tuple(round(float(c), 3) for c in raw)
+
+
+def _box_in_inches(shape: dict) -> tuple[float, float, float, float]:
+    return tuple(  # type: ignore[return-value]
+        float(shape[key]) / windows.POINTS_PER_INCH for key in ("x0", "top", "x1", "bottom")
+    )
+
+
+def _outlines(colour: tuple[float, float, float]) -> list[tuple[float, float, float, float]]:
+    """Stroked, unfilled boxes of one colour in LetterStream's PreFlight result, in inches.
+
+    Filled shapes of the same colour are the round label markers beside each
+    box, so they are excluded.
+    """
+    import pdfplumber
+
+    with pdfplumber.open(str(PREFLIGHT_RESULT)) as pdf:
+        page = pdf.pages[0]
+        shapes = list(page.rects) + list(page.curves)
+        return [
+            _box_in_inches(shape)
+            for shape in shapes
+            if _colour(shape) == colour and shape.get("stroke") and not shape.get("fill")
+        ]
+
+
+def _matches(zone: windows.Zone, box: tuple[float, float, float, float]) -> bool:
+    expected = (zone.x0, zone.y0, zone.x1, zone.y1)
+    return all(abs(a - b) <= DRAWING_TOLERANCE_IN for a, b in zip(expected, box))
+
+
+def _shown(boxes) -> list[tuple[float, ...]]:
+    return [tuple(round(v, 3) for v in box) for box in boxes]
+
+
+@pytest.mark.parametrize(
+    ("colour", "zones"),
+    [
+        (RED, [windows.TO_OPENING, windows.FROM_OPENING]),
+        (GREEN, [windows.TO_SAFE, windows.FROM_SAFE, windows.CERT_AREA]),
+        (GREY, [windows.MARGIN_BOX]),
+    ],
+    ids=["red-openings", "green-safe-zones-and-cert", "grey-margins"],
+)
+def test_every_zone_matches_letterstreams_drawing(colour, zones):
+    """Each rectangle in windows.py is exactly one of LetterStream's boxes, and vice versa.
+
+    Read from the PDF that PreFlight returned for the calibration grid on
+    2026-10-16. The pairing is one to one: a mistyped number fails, a zone that
+    duplicates another's figures fails (the box it left behind has no zone), and
+    so does a box LetterStream drew that the code has no zone for.
+    """
+    drawn = _outlines(colour)
+    assert len(drawn) == len(zones), (
+        f"expected {len(zones)} outline(s), drawing has {len(drawn)}: {_shown(drawn)}"
+    )
+    claimed: dict[int, str] = {}
+    for zone in zones:
+        hits = [i for i, box in enumerate(drawn) if _matches(zone, box)]
+        assert len(hits) == 1, (
+            f"{zone.name} {zone.as_dict()} matches {len(hits)} boxes in the drawing, "
+            f"not one: {_shown(drawn)}"
+        )
+        assert hits[0] not in claimed, (
+            f"{zone.name} and {claimed[hits[0]]} both match the drawn box "
+            f"{_shown([drawn[hits[0]]])[0]}; one of them is wrong"
+        )
+        claimed[hits[0]] = zone.name
+    unclaimed = [box for i, box in enumerate(drawn) if i not in claimed]
+    assert unclaimed == [], f"LetterStream drew boxes no zone accounts for: {_shown(unclaimed)}"
+
+
+def test_the_committed_preflight_result_is_letterstreams_and_carries_nothing_else():
+    """The fixture is LetterStream's own output, holding only the grid and their overlay.
+
+    Pins down what the geometry test is measuring against: a page LetterStream
+    produced and labelled, not a local redraw. It also keeps the fixture free of
+    anything but the grid: no author or other identifying metadata, no images,
+    annotations or links, and no word on the page beyond the rulers, the grid's
+    caption and the overlay's labels.
+    """
+    import pdfplumber
+
+    with pdfplumber.open(str(PREFLIGHT_RESULT)) as pdf:
+        assert pdf.metadata.get("Creator") == "LetterStream"
+        assert pdf.metadata.get("Title") == "LetterStream Envelope Preflight"
+        assert set(pdf.metadata) <= {"Title", "Creator", "CreationDate", "Producer"}, pdf.metadata
+        assert len(pdf.pages) == 1
+        page = pdf.pages[0]
+        assert (page.width, page.height) == (612, 792)
+        assert page.images == [] and page.annots == [] and page.hyperlinks == []
+        words = page.extract_words()
+        sideways = "".join(c["text"] for c in page.chars if not c.get("upright", True))
+    assert sideways == LETTERSTREAM_LABEL
+    upright = {w["text"] for w in words if w.get("upright", True)}
+    assert upright == GRID_WORDS | OVERLAY_WORDS, {
+        "unexpected": sorted(upright - GRID_WORDS - OVERLAY_WORDS),
+        "missing": sorted((GRID_WORDS | OVERLAY_WORDS) - upright),
+    }

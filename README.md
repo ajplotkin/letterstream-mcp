@@ -430,10 +430,15 @@ default.
 
 **The measured geometry.** These figures were read from the vector drawings in
 the PDF that PreFlight returned on 2026-10-16 for a letter-size calibration
-grid. A redraw of that grid is `tests/fixtures/calibration_grid.pdf`;
-LetterStream's result is not committed. The result labelled itself
-"LetterStream Preflight v4 revised 06/18/2024". Inches from the top-left of the
-page, rounded to 0.01:
+grid. That result is committed as
+`tests/fixtures/preflight_calibration_result.pdf`. It labels itself
+"LetterStream Preflight v4 revised 06/18/2024", and `test_windows.py` checks
+that it is LetterStream's output carrying nothing but the grid and their
+overlay. The same file checks the rectangles in `windows.py`, which this table
+transcribes, against the boxes drawn in that result, one box per rectangle and
+one rectangle per box, so a figure mistyped by even 0.01 in fails the suite. A
+redraw of the grid that was sent is `tests/fixtures/calibration_grid.pdf`.
+Inches from the top-left of the page, rounded to 0.01:
 
 | Area | Opening (red box) x | Opening y | Safe zone (green box) x | Safe zone y |
 |---|---|---|---|---|
@@ -592,7 +597,7 @@ against fixtures only.
 pytest -v
 ```
 
-197 tests, no network. An autouse fixture patches the socket entry points
+201 tests, no network. An autouse fixture patches the socket entry points
 `requests` reaches for — `socket.create_connection`, `socket.socket.connect` and
 `socket.socket.connect_ex` — and raises if a test tries to connect; one test
 deliberately trips it, so the block is verified rather than assumed. Every
@@ -616,7 +621,7 @@ The safety tests:
 | `test_credentials.py` | missing credentials give a message and exit 2, with no traceback and no transport call; there is no `--live` flag anywhere in the parser |
 | `test_concurrency.py` | six threads authorising one proof release it exactly once, and the other five are told it was already authorised; identical simultaneous submits create one held job; a crash between claiming a release and recording it refuses every caller queued behind it; a caller that cannot get the lock refuses rather than mailing; six independently built gates over one state directory (half of them via a symlink) release it once; four separate processes releasing one proof release it once |
 | `test_preflight.py` | PreFlight reaches only `transport.preflight`, never submit or release, and writes no ledger entry; the upload goes under `preflight_file`, never `single_file`; every submission field is refused before a request is built; dry run refuses; an existing file, including the input, is never overwritten |
-| `test_windows.py` | the local heuristic flags a date in the TO window, a line below it, and text or drawings in the CERT area, and passes a page laid out inside the safe zones; `window_check` never runs unless asked for; with `coversheet="N"` it refuses a bad layout before any transport call, and with `"Y"` it reports and still submits; `coversheet` is never changed |
+| `test_windows.py` | the local heuristic flags a date in the TO window, a line below it, and text or drawings in the CERT area, and passes a page laid out inside the safe zones; `window_check` never runs unless asked for; with `coversheet="N"` it refuses a bad layout before any transport call, and with `"Y"` it reports and still submits; `coversheet` is never changed; every window rectangle matches exactly one box in LetterStream's own PreFlight drawing and every box has a rectangle; the committed PreFlight result is LetterStream's, with no metadata, text, image or link beyond the grid and its overlay |
 | `test_repo_hygiene.py` | no absolute home paths, no credential-shaped literals, blank example config, correct `.gitignore`, and neither `config.toml` nor `state/` committed |
 
 ### Mutation testing
@@ -632,13 +637,15 @@ python tools/mutation_test.py --list   # list them
 python tools/mutation_test.py -k dry_run
 ```
 
-43 mutations, all currently caught. `--list` names them; they cover the gate
+45 mutations, all currently caught. `--list` names them; they cover the gate
 (make `submit` call `release`, make `authorize` skip the re-hash or trust the
 caller's hash), dry run, idempotency and retry, every lock, credential and
 authcode handling, cost, the read-only error handling, and the PreFlight and
 window-check guards (PreFlight mailing, uploading as a submission, ignoring dry
 run or overwriting files; the window check running unasked, not refusing
-`coversheet="N"`, or ignoring text in the CERT area or outside a safe zone).
+`coversheet="N"`, ignoring text in the CERT area or outside a safe zone, a
+window rectangle that no longer matches LetterStream's drawing, or one that
+duplicates another's figures).
 The script exits non-zero if any mutation survives, and refuses to run if the
 unmutated copy does not pass first.
 
